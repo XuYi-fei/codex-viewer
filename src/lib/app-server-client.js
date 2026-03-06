@@ -1,0 +1,183 @@
+import { EventEmitter } from 'node:events';
+import { spawn } from 'node:child_process';
+import process from 'node:process';
+import { randomToken, wait, nowIso } from './utils.js';
+
+export class AppServerClient extends EventEmitter {
+  constructor({ port, workspacePath, proxyPort, model = null, approvalPolicy = 'on-request', sandbox = 'workspace-write' }) {
+    super();
+    this.port = port;
+    this.workspacePath = workspacePath;
+    this.proxyPort = proxyPort;
+    this.model = model;
+    this.approvalPolicy = approvalPolicy;
+    this.sandbox = sandbox;
+    this.child = null;
+    this.ws = null;
+    this.requestMap = new Map();
+    this.pendingApprovals = new Map();
+  }
+
+  async start() {
+    const listenUrl = `ws://127.0.0.1:${this.port}`;
+    const env = {
+      ...process.env,
+      OPENAI_BASE_URL: `http://127.0.0.1:${this.proxyPort}`,
+      HTTP_PROXY: `http://127.0.0.1:${this.proxyPort}`,
+      HTTPS_PROXY: `http://127.0.0.1:${this.proxyPort}`,
+      ALL_PROXY: `http://127.0.0.1:${this.proxyPort}`,
+    };
+    this.child = spawn('codex', ['app-server', '--listen', listenUrl], {
+      cwd: this.workspacePath,
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    this.child.stdout.on('data', (chunk) => this.emit('diagnostic', { stream: 'stdout', text: chunk.toString('utf8') }));
+    this.child.stderr.on('data', (chunk) => this.emit('diagnostic', { stream: 'stderr', text: chunk.toString('utf8') }));
+    this.child.on('exit', (code, signal) => this.emit('exit', { code, signal }));
+
+    await this.connect(listenUrl);
+    await this.initialize();
+  }
+
+  async connect(url) {
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      try {
+        const ws = new WebSocket(url);
+        await new Promise((resolve, reject) => {
+          ws.addEventListener('open', resolve, { once: true });
+          ws.addEventListener('error', reject, { once: true });
+        });
+        this.ws = ws;
+        ws.addEventListener('message', (event) => this.handleMessage(event.data.toString()));
+        ws.addEventListener('close', () => this.emit('closed'));
+        return;
+      } catch {
+        await wait(150);
+      }
+    }
+    throw new Error(`Failed to connect to Codex app-server at ${url}`);
+  }
+
+  async initialize() {
+    await this.request('initialize', {
+      clientInfo: {
+        name: 'codex-viewer',
+        version: '0.1.0',
+      },
+      capabilities: {
+        experimentalApi: true,
+      },
+    });
+    this.notify('initialized');
+  }
+
+  async request(method, params) {
+    const id = randomToken(10);
+    const payload = { jsonrpc: '2.0', id, method, params };
+    const promise = new Promise((resolve, reject) => {
+      this.requestMap.set(id, { resolve, reject, method });
+    });
+    this.ws.send(JSON.stringify(payload));
+    return promise;
+  }
+
+  notify(method, params) {
+    this.ws.send(JSON.stringify({ jsonrpc: '2.0', method, params }));
+  }
+
+  respond(id, result) {
+    this.ws.send(JSON.stringify({ jsonrpc: '2.0', id, result }));
+  }
+
+  async listThreads() {
+    return this.request('thread/list', {});
+  }
+
+  async readThread(threadId) {
+    return this.request('thread/read', { threadId, includeTurns: true });
+  }
+
+  async resumeThread(threadId, { cwd = this.workspacePath, model = this.model, sandbox = this.sandbox, approvalPolicy = this.approvalPolicy, personality = 'pragmatic' } = {}) {
+    return this.request('thread/resume', {
+      threadId,
+      cwd,
+      model,
+      sandbox,
+      approvalPolicy,
+      personality,
+    });
+  }
+
+  async startThread({ cwd = this.workspacePath, model = this.model, sandbox = this.sandbox, approvalPolicy = this.approvalPolicy } = {}) {
+    return this.request('thread/start', {
+      cwd,
+      model,
+      sandbox,
+      approvalPolicy,
+      personality: 'pragmatic',
+    });
+  }
+
+  async sendTurn({ threadId, prompt, cwd = this.workspacePath, model = this.model, sandboxPolicy = null, approvalPolicy = null }) {
+    return this.request('turn/start', {
+      threadId,
+      cwd,
+      model,
+      sandboxPolicy,
+      approvalPolicy,
+      input: [{ type: 'text', text: prompt }],
+    });
+  }
+
+  async interruptTurn(threadId) {
+    return this.request('turn/interrupt', { threadId });
+  }
+
+  async resolveApproval(id, result) {
+    this.respond(id, result);
+  }
+
+  stop() {
+    try {
+      this.ws?.close();
+    } catch {}
+    if (this.child && !this.child.killed) {
+      this.child.kill('SIGTERM');
+    }
+  }
+
+  handleMessage(raw) {
+    let message;
+    try {
+      message = JSON.parse(raw);
+    } catch {
+      this.emit('diagnostic', { stream: 'protocol', text: raw.toString() });
+      return;
+    }
+
+    if (message.id && this.requestMap.has(message.id) && Object.prototype.hasOwnProperty.call(message, 'result')) {
+      const pending = this.requestMap.get(message.id);
+      this.requestMap.delete(message.id);
+      pending.resolve(message.result);
+      this.emit('response', { method: pending.method, result: message.result, timestamp: nowIso() });
+      return;
+    }
+    if (message.id && this.requestMap.has(message.id) && message.error) {
+      const pending = this.requestMap.get(message.id);
+      this.requestMap.delete(message.id);
+      pending.reject(new Error(message.error.message || JSON.stringify(message.error)));
+      return;
+    }
+
+    if (message.id && message.method) {
+      this.pendingApprovals.set(message.id, message);
+      this.emit('serverRequest', { requestId: message.id, method: message.method, params: message.params, timestamp: nowIso() });
+      return;
+    }
+
+    if (message.method) {
+      this.emit('notification', { method: message.method, params: message.params, timestamp: nowIso() });
+    }
+  }
+}

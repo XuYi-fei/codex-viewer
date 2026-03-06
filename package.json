@@ -1,0 +1,28 @@
+{
+  "name": "codex-viewer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Sidecar web controller and network viewer for Codex CLI",
+  "bin": {
+    "codex-viewer": "cli.js"
+  },
+  "scripts": {
+    "start": "node cli.js start --foreground",
+    "start:bg": "node cli.js start",
+    "dev": "node cli.js start --foreground",
+    "here": "node scripts/workspace-cli.js start --foreground",
+    "here:bg": "node scripts/workspace-cli.js start",
+    "here:public": "node scripts/workspace-cli.js start --foreground --web-host 0.0.0.0",
+    "here:public:bg": "node scripts/workspace-cli.js start --web-host 0.0.0.0",
+    "open": "node cli.js open",
+    "open:here": "node scripts/workspace-cli.js open",
+    "status": "node cli.js status",
+    "status:here": "node scripts/workspace-cli.js status",
+    "stop": "node cli.js stop",
+    "stop:here": "node scripts/workspace-cli.js stop"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
