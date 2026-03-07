@@ -93,6 +93,19 @@ pre {
   align-items: center;
   flex-wrap: wrap;
 }
+.headerControlRow {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+}
+.headerActionBtn {
+  padding: 6px 9px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.1;
+}
 .container {
   display: grid;
   grid-template-columns: 300px minmax(0, 1fr) 340px;
@@ -116,6 +129,7 @@ pre {
 }
 .mainColumn {
   overflow: hidden;
+  position: relative;
 }
 .panel {
   background: linear-gradient(180deg, rgba(18, 26, 45, 0.95), rgba(15, 23, 40, 0.94));
@@ -356,25 +370,10 @@ textarea {
 .bottomControlPanel {
   flex: 0 0 auto;
 }
-.mobileQuickPanel {
+.mobileDrawerToggle,
+.mobileDrawerOverlay,
+.mobileDrawerPanel {
   display: none;
-}
-.mobileQuickRow {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-.mobileQuickRow .button {
-  flex: 1 1 calc(33.33% - 6px);
-  min-width: 110px;
-}
-.mobileCurrentThread {
-  margin-top: 8px;
-  color: var(--muted);
-  font-size: 12px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .badge, .statusBadge, .pill {
@@ -507,40 +506,69 @@ textarea {
 .messageList {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 0;
+  position: relative;
+}
+.conversationMiniTitle {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  align-self: flex-start;
+  margin: 0 0 2px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(10, 18, 32, 0.88);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  color: #aebfdc;
+  font-size: 10px;
+  line-height: 1.3;
+  backdrop-filter: blur(4px);
 }
 .messageBlock {
-  max-width: 100%;
-  padding: 2px 0;
+  max-width: 88%;
+  padding: 0;
+  margin: 0;
+}
+.messageBlock.user {
+  align-self: flex-end;
+}
+.messageBlock.assistant {
+  align-self: flex-start;
 }
 .messageBlock.user .messageBodyText {
-  color: #c4d9ff;
+  color: #c8d8f6;
 }
 .messageBlock.assistant .messageBodyText {
   color: #e9eef9;
 }
 .messageBodyText {
   font-size: 14px;
-  line-height: 1.62;
+  line-height: 1.4;
   white-space: pre-wrap;
   word-break: break-word;
 }
 .plainUserText {
   font-size: 13px;
-  line-height: 1.55;
+  line-height: 1.35;
   white-space: pre-wrap;
 }
 .messageMeta {
   display: flex;
   justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 4px;
+  gap: 6px;
+  margin-bottom: 3px;
   font-size: 12px;
   color: var(--muted);
 }
 .messageMeta.plain {
   font-size: 11px;
-  margin-bottom: 2px;
+  margin-bottom: 1px;
+}
+.messageBlock.user .messageMeta.plain {
+  justify-content: flex-end;
+}
+.messageBlock.assistant .messageMeta.plain {
+  justify-content: flex-start;
 }
 .messageEvent {
   align-self: flex-start;
@@ -548,9 +576,9 @@ textarea {
   border: 1px solid rgba(255,255,255,0.10);
   border-radius: 10px;
   background: rgba(255,255,255,0.03);
-  padding: 7px 9px;
-  font-size: 12px;
-  line-height: 1.45;
+  padding: 5px 7px;
+  font-size: 11px;
+  line-height: 1.35;
 }
 .messageEventMeta {
   display: flex;
@@ -558,31 +586,18 @@ textarea {
   justify-content: space-between;
   gap: 8px;
   color: var(--muted);
-  font-size: 11px;
-  margin-bottom: 4px;
+  font-size: 10px;
+  margin-bottom: 2px;
 }
 .messageEvent.waiting {
   border-style: dashed;
   border-color: rgba(78, 161, 255, 0.44);
   background: rgba(78, 161, 255, 0.08);
 }
-.messageEvent.tool {
-  border-color: rgba(255,255,255,0.12);
-}
-.messageEvent.tool.running {
-  border-color: rgba(255, 191, 71, 0.28);
-}
-.messageEvent.tool.done {
-  border-color: rgba(47, 208, 127, 0.24);
-}
-.toolSummary {
-  font-size: 11px;
-  color: var(--muted);
-}
 .messageEvent pre {
-  margin-top: 6px;
-  font-size: 11px;
-  line-height: 1.42;
+  margin-top: 4px;
+  font-size: 10px;
+  line-height: 1.35;
 }
 .timeline {
   display: flex;
@@ -603,43 +618,100 @@ textarea {
   letter-spacing: .04em;
 }
 
-.messageEvent.thinking {
-  background: rgba(255, 191, 71, 0.06);
-  border-color: rgba(255, 191, 71, 0.22);
-  max-width: 82%;
+.messageThinking {
+  align-self: flex-start;
+  max-width: 86%;
+  padding: 0;
+  margin: 0;
+  line-height: 1.2;
 }
-.thinkingPreview {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
+.thinkingLabel {
+  color: #b8772f;
+  font-size: 10px;
+  line-height: 1.2;
+  margin-bottom: 0;
 }
-.thinkingLine {
-  color: #f8deb0;
-  font-size: 12px;
-  line-height: 1.4;
-}
-.thinkingDetails {
-  margin-top: 6px;
-}
-.thinkingDetails summary {
-  cursor: pointer;
-  color: var(--muted);
+.thinkingBody {
+  color: #d2d8e4;
   font-size: 11px;
+  line-height: 1.2;
+  white-space: normal;
 }
-.thinkingDetails pre {
-  margin-top: 6px;
-  max-height: 160px;
-  overflow: auto;
-  padding: 7px 8px;
+.toolCard {
+  align-self: flex-start;
+  max-width: 74%;
+  border: 1px solid rgba(255,255,255,0.12);
   border-radius: 8px;
-  background: rgba(255,255,255,0.04);
-  border: 1px solid rgba(255,255,255,0.06);
+  background: rgba(255,255,255,0.03);
+  padding: 0;
+  margin: 0;
+}
+.toolCard.running {
+  border-color: rgba(255, 191, 71, 0.28);
+}
+.toolCard.done {
+  border-color: rgba(47, 208, 127, 0.24);
+}
+.toolCard summary {
+  list-style: none;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px 2px;
+  cursor: pointer;
+}
+.toolCard summary::-webkit-details-marker {
+  display: none;
+}
+.toolCardTitle {
+  color: #e2e8f6;
+  font-size: 10px;
+  font-weight: 600;
+}
+.toolCardStatus {
+  color: var(--muted);
+  font-size: 10px;
+}
+.toolCardPreview {
+  padding: 0 6px 3px;
+  color: #d4dcee;
+  font-size: 10px;
+  line-height: 1.25;
+}
+.toolCardBody {
+  border-top: 1px solid rgba(255,255,255,0.08);
+  padding: 4px 6px 5px;
+}
+.toolCardMethod {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.25;
+  margin-bottom: 3px;
+}
+.toolCardBody pre {
+  font-size: 10px;
+  line-height: 1.3;
+  color: #d9deea;
+}
+.messageEvent.fileChange {
+  border-color: rgba(120, 192, 255, 0.25);
+  background: rgba(120, 192, 255, 0.06);
+}
+.fileChangeBody {
   font-size: 11px;
-  line-height: 1.38;
+  line-height: 1.3;
+}
+.conversationTailTime {
+  align-self: center;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.2;
+  margin-top: 1px;
 }
 .markdownContent {
-  font-size: 14px;
-  line-height: 1.65;
+  font-size: 13px;
+  line-height: 1.42;
 }
 .markdownContent > :first-child { margin-top: 0; }
 .markdownContent > :last-child { margin-bottom: 0; }
@@ -654,18 +726,18 @@ textarea {
 .markdownContent h4,
 .markdownContent h5,
 .markdownContent h6 {
-  margin: 0 0 10px;
+  margin: 0;
 }
 .markdownContent ul,
 .markdownContent ol {
-  padding-left: 20px;
+  padding-left: 16px;
 }
 .markdownContent li + li {
-  margin-top: 4px;
+  margin-top: 1px;
 }
 .markdownContent blockquote {
-  padding-left: 12px;
-  border-left: 3px solid rgba(78, 161, 255, 0.45);
+  padding-left: 8px;
+  border-left: 2px solid rgba(78, 161, 255, 0.45);
   color: #c8d6f0;
 }
 .markdownContent a {
@@ -795,21 +867,82 @@ textarea {
     position: static;
     padding: 10px 12px;
   }
+  .headerActions {
+    width: 100%;
+    gap: 6px;
+  }
+  .headerControlRow {
+    margin-left: auto;
+  }
+  .headerActionBtn {
+    padding: 5px 8px;
+    font-size: 11px;
+  }
   .sidebar, .rightbar {
     display: none;
   }
   .mainColumn {
     height: 100%;
   }
-  .mobileQuickPanel {
+  .mobileDrawerToggle {
+    display: inline-flex;
+    position: fixed;
+    top: 10px;
+    left: 10px;
+    z-index: 58;
+    width: 34px;
+    height: 34px;
+    border-radius: 10px;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    background: rgba(12, 20, 35, 0.86);
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 4px;
+    padding: 0;
+    backdrop-filter: blur(8px);
+  }
+  .mobileDrawerToggle span {
     display: block;
-    margin-bottom: 10px;
+    width: 16px;
+    height: 1.8px;
+    border-radius: 999px;
+    background: #e8eefc;
+  }
+  .mobileDrawerOverlay {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 56;
+    background: rgba(3, 7, 14, 0.45);
+  }
+  .mobileDrawerPanel {
+    display: block;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: min(280px, 76vw);
+    height: 100vh;
+    z-index: 57;
+    border-right: 1px solid rgba(255, 255, 255, 0.10);
+    background: linear-gradient(180deg, rgba(16, 24, 42, 0.98), rgba(10, 16, 30, 0.98));
+    box-shadow: 14px 0 28px rgba(0, 0, 0, 0.38);
+    padding: 58px 12px 12px;
+  }
+  .mobileDrawerActions {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .mobileDrawerActions .button {
+    width: 100%;
+    justify-content: flex-start;
   }
   .mainContentPanel {
     min-height: 0;
   }
   .scrollArea { max-height: unset; }
-  .messageBlock, .messageEvent { max-width: 100%; }
+  .messageBlock, .messageEvent, .messageThinking, .toolCard { max-width: 100%; }
   .composerInputRow {
     display: block;
   }
@@ -850,10 +983,33 @@ textarea {
   background: linear-gradient(180deg, rgba(18, 26, 45, 0.98), rgba(12, 18, 32, 0.98));
   box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
 }
+.modalCard.drawerCard {
+  width: min(360px, calc(100vw - 16px));
+  height: calc(100vh - 16px);
+  max-height: calc(100vh - 16px);
+  margin-left: auto;
+  border-radius: 14px;
+}
+.modalOverlay .drawerCard {
+  align-self: stretch;
+}
 .modalBody {
   margin-top: 12px;
   max-height: calc(100vh - 150px);
   padding-right: 6px;
+}
+.mobileNavList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.mobileNavButton {
+  width: 100%;
+  justify-content: flex-start;
+}
+.mobileNavButton.active {
+  border-color: var(--accent);
+  color: var(--accent-strong);
 }
 .modalSection + .modalSection {
   margin-top: 12px;
@@ -880,4 +1036,42 @@ textarea {
   font-size: 12px;
   line-height: 1.45;
   word-break: break-word;
+}
+.logsLayout {
+  flex: 1;
+  min-height: 0;
+  align-items: stretch;
+}
+.logsPanel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+.logsRequestList {
+  max-height: none;
+  overflow: auto;
+}
+.logsDetailPane {
+  min-height: 0;
+  max-height: none;
+  overflow: auto;
+  padding-right: 4px;
+}
+.logSection {
+  margin-bottom: 8px;
+}
+.logSection:last-child {
+  margin-bottom: 0;
+}
+.logPre {
+  max-height: 260px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.logList {
+  max-height: 220px;
+  overflow: auto;
+  padding-right: 2px;
 }

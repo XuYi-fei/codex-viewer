@@ -99,6 +99,67 @@ function buildFileChangeSummary(item) {
   };
 }
 
+function isToolItemType(value) {
+  const text = String(value || '').toLowerCase();
+  return text.includes('tool') || text.includes('command') || text.includes('mcp');
+}
+
+function isToolEvent(entry) {
+  if (!entry) return false;
+  const kind = String(entry.kind || '').toLowerCase();
+  if (kind === 'tool_event' || kind === 'command') return true;
+  if ((kind === 'item_started' || kind === 'item_completed') && isToolItemType(entry.itemType)) return true;
+  if (kind.startsWith('item/') && (kind.includes('/tool/') || kind.includes('/commandexecution/') || kind.includes('/mcp'))) return true;
+  if (kind === 'item_loaded' && isToolItemType(entry.itemType)) return true;
+  return false;
+}
+
+function toolEventKey(entry = {}) {
+  return [
+    entry.kind || '',
+    entry.threadId || '',
+    entry.turnId || '',
+    entry.itemId || '',
+    entry.callId || '',
+    entry.method || '',
+    entry.timestamp || '',
+  ].join('|');
+}
+
+function commandLogKey(entry = {}) {
+  return [
+    entry.threadId || '',
+    entry.turnId || '',
+    entry.itemId || '',
+    entry.callId || '',
+  ].join('|');
+}
+
+function mergeCommandLogs(current = [], previous = []) {
+  const merged = new Map();
+  for (const entry of [...current, ...previous]) {
+    const key = commandLogKey(entry);
+    const existing = merged.get(key);
+    if (!existing) {
+      merged.set(key, { ...entry });
+      continue;
+    }
+    const next = { ...existing };
+    const existingTs = Date.parse(existing.updatedAt || 0) || 0;
+    const entryTs = Date.parse(entry.updatedAt || 0) || 0;
+    if (entryTs >= existingTs) {
+      Object.assign(next, entry);
+    } else {
+      if ((entry.output || '').length > (next.output || '').length) next.output = entry.output || next.output;
+      if (next.exitCode == null && entry.exitCode != null) next.exitCode = entry.exitCode;
+      if (next.status == null && entry.status != null) next.status = entry.status;
+      if (next.durationMs == null && entry.durationMs != null) next.durationMs = entry.durationMs;
+    }
+    merged.set(key, next);
+  }
+  return [...merged.values()];
+}
+
 export class ViewerStore {
   constructor({ workspacePath, localUrl, publicUrl, pairUrl, proxyPort, appServerPort }) {
     this.workspacePath = workspacePath;
@@ -495,7 +556,8 @@ export class ViewerStore {
     this.threadMap.set(summary.id, merged);
 
     const hasHydratableTurns = turns.some((turn) => Array.isArray(turn?.items) && turn.items.length > 0);
-    const detail = hasHydratableTurns ? createThreadDetails(summary.id) : (this.threadDetails.get(summary.id) || createThreadDetails(summary.id));
+    const previousDetail = this.threadDetails.get(summary.id) || createThreadDetails(summary.id);
+    const detail = hasHydratableTurns ? createThreadDetails(summary.id) : previousDetail;
     const fallbackTimestamp = toIsoTimestamp(thread.updatedAt) || nowIso();
 
     if (hasHydratableTurns) {
@@ -652,6 +714,20 @@ export class ViewerStore {
           timestamp,
         });
       }
+    }
+
+    if (hasHydratableTurns) {
+      const previousToolEvents = (previousDetail.events || []).filter((entry) => isToolEvent(entry));
+      if (previousToolEvents.length > 0) {
+        const seen = new Set(detail.events.map((entry) => toolEventKey(entry)));
+        for (const entry of previousToolEvents) {
+          const key = toolEventKey(entry);
+          if (seen.has(key)) continue;
+          detail.events.push({ ...entry });
+          seen.add(key);
+        }
+      }
+      detail.commandLog = mergeCommandLogs(detail.commandLog || [], previousDetail.commandLog || []);
     }
 
     detail.messages.sort((left, right) => new Date(left.createdAt || left.updatedAt || 0).getTime() - new Date(right.createdAt || right.updatedAt || 0).getTime());

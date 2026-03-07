@@ -22,7 +22,12 @@ function serveStatic(publicDir, pathname, res) {
     send(res, json({ error: 'Not found' }, 404));
     return true;
   }
-  res.writeHead(200, { 'content-type': contentType(filePath) });
+  res.writeHead(200, {
+    'content-type': contentType(filePath),
+    'cache-control': 'no-store, no-cache, must-revalidate, max-age=0',
+    pragma: 'no-cache',
+    expires: '0',
+  });
   res.end(readFileSync(filePath));
   return true;
 }

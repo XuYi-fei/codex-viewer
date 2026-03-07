@@ -19,6 +19,7 @@ const state = {
   showTimeline: false,
   loadingThreadIds: new Set(),
   modal: null,
+  mobileDrawerOpen: false,
   sendingPrompt: false,
   promptIsComposing: false,
   promptLastCompositionEndAt: 0,
@@ -186,67 +187,78 @@ function renderMarkdown(text = '') {
   return html || '<p></p>';
 }
 
-function thinkingPreviewLines(message) {
-  const primary = message.summaryText || message.text || '';
-  return String(primary)
+function compactStreamingText(value, { keepSingleBlank = false } = {}) {
+  const lines = String(value || '')
+    .replace(/\r\n/g, '\n')
     .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .slice(0, 3);
+    .map((line) => line.replace(/\s+$/g, ''));
+  const output = [];
+  let blankCount = 0;
+
+  for (const rawLine of lines) {
+    const line = String(rawLine || '').replace(/^\s+/g, '');
+    if (!line.trim()) {
+      blankCount += 1;
+      if (!keepSingleBlank || blankCount > 1) continue;
+      output.push('');
+      continue;
+    }
+    blankCount = 0;
+    output.push(line);
+  }
+
+  return output.join('\n').trim();
+}
+
+function normalizeThinkingText(value = '') {
+  const compact = compactStreamingText(value, { keepSingleBlank: false });
+  if (!compact) return '';
+  const plain = compact
+    .replace(/\r\n/g, '\n')
+    .replace(/^\s*[-*+]\s+/gm, '')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/__([^_]+)__/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/(^|[^*])\*([^*]+)\*(?!\*)/g, '$1$2')
+    .replace(/(^|[^_])_([^_]+)_(?!_)/g, '$1$2')
+    .replace(/\n+/g, ' ')
+    .replace(/[ \t]{2,}/g, ' ');
+  return plain.trim();
+}
+
+function normalizeAssistantText(value = '') {
+  const compact = compactStreamingText(value, { keepSingleBlank: false });
+  return compact.replace(/\n{2,}/g, '\n').trim();
 }
 
 function renderThinking(message) {
-  const previewLines = thinkingPreviewLines(message);
-  const expandedBody = message.text || '';
-  const hasDetails = expandedBody && expandedBody !== (message.summaryText || '');
-  return `
-    <div class="messageEvent thinking">
-      <div class="messageEventMeta">
-        <span>思考</span>
-        <span>${escapeHtml(message.status || '进行中')}</span>
-      </div>
-      ${previewLines.length ? `
-        <div class="thinkingPreview">
-          ${previewLines.map((line) => `<div class="thinkingLine">${escapeHtml(line)}</div>`).join('')}
-        </div>
-      ` : '<div class="muted">正在思考…</div>'}
-      ${hasDetails ? `
-        <details class="thinkingDetails">
-          <summary>展开详情</summary>
-          <pre>${escapeHtml(expandedBody)}</pre>
-        </details>
-      ` : ''}
-    </div>
-  `;
+  const content = normalizeThinkingText(message.text || message.summaryText || '');
+  return `<div class="messageThinking"><span class="thinkingLabel">Thinking...</span> <span class="thinkingBody">${content ? escapeHtml(content) : '等待思考输出…'}</span></div>`;
 }
 
 function renderMessageBlock(message) {
-  return `
-    <div class="messageBlock ${message.role === 'user' ? 'user' : 'assistant'}">
-      <div class="messageMeta plain">
-        <span>${escapeHtml(messageRoleLabel(message.role))}</span>
-        <span>${escapeHtml(formatTime(message.updatedAt))}</span>
-      </div>
-      <div class="messageBodyText">
-        ${message.role === 'assistant'
-          ? `<div class="markdownContent">${renderMarkdown(message.text || '')}</div>`
-          : `<div class="plainUserText">${escapeHtml(message.text || '')}</div>`}
-      </div>
-    </div>
-  `;
+  const assistantText = message.role === 'assistant' ? normalizeAssistantText(message.text || '') : '';
+  return `<div class="messageBlock ${message.role === 'user' ? 'user' : 'assistant'}"><div class="messageBodyText">${
+    message.role === 'assistant'
+      ? `<div class="markdownContent">${renderMarkdown(assistantText)}</div>`
+      : `<div class="plainUserText">${escapeHtml(message.text || '')}</div>`
+  }</div></div>`;
 }
 
 function renderToolCall(card) {
-  return `
-    <div class="messageEvent tool ${card.status === '已完成' ? 'done' : 'running'}">
-      <div class="messageEventMeta">
-        <span>${escapeHtml(card.title || '工具调用')}</span>
-        <span>${escapeHtml(card.status || '运行中')}</span>
-      </div>
-      <div class="toolSummary">${escapeHtml(formatTime(card.updatedAt))}</div>
-      ${card.output ? `<pre>${escapeHtml(compactText(card.output, 180))}</pre>` : ''}
-    </div>
-  `;
+  const preview = card.output ? compactText(card.output, 64) : '等待输出…';
+  return `<details class="toolCard ${card.status === '已完成' ? 'done' : 'running'}"><summary><span class="toolCardTitle">${escapeHtml(card.title || '工具调用')}</span><span class="toolCardStatus">${escapeHtml(card.status || '运行中')}</span></summary><div class="toolCardPreview">${escapeHtml(preview)}</div><div class="toolCardBody">${card.method ? `<div class="toolCardMethod">${escapeHtml(card.method)}</div>` : ''}<pre>${escapeHtml(card.output || '暂无输出')}</pre></div></details>`;
+}
+
+function isFileChangeMessage(message) {
+  if (!message || message.role !== 'assistant') return false;
+  const text = String(message.text || '').trim();
+  if (!text) return false;
+  return /^Updated(?:\s+\d+)?\s+files?\./i.test(text) || text === 'Updated files.';
+}
+
+function renderFileChangeMessage(message) {
+  return `<div class="messageEvent fileChange"><div class="messageEventMeta"><span>文件变更</span></div><div class="fileChangeBody markdownContent">${renderMarkdown(message.text || '')}</div></div>`;
 }
 
 function formatTime(value) {
@@ -303,13 +315,6 @@ function viewerRoleLabel(role) {
   if (role === 'controller') return '控制端';
   if (role === 'viewer') return '观察端';
   return role || '未知';
-}
-
-function messageRoleLabel(role) {
-  if (role === 'user') return '用户';
-  if (role === 'assistant') return '助手';
-  if (role === 'reasoning') return '思考';
-  return role || '消息';
 }
 
 function tabLabel(tab) {
@@ -486,6 +491,7 @@ function isToolEvent(event) {
   const kind = String(event.kind || '').toLowerCase();
   if (kind === 'command' || kind === 'tool_event') return true;
   if ((kind === 'item_started' || kind === 'item_completed') && isToolItemType(event.itemType)) return true;
+  if (kind === 'item_loaded' && isToolItemType(event.itemType)) return true;
   if (kind.startsWith('item/') && (kind.includes('/tool/') || kind.includes('/commandexecution/') || kind.includes('/mcp'))) return true;
   return false;
 }
@@ -522,6 +528,9 @@ function buildToolActivityCards(thread) {
       if (typeof event.delta === 'string') {
         current.output = `${current.output}${event.delta}`;
       }
+    } else if (event.kind === 'item_loaded') {
+      current.title = event.itemType ? `工具 ${event.itemType}` : current.title;
+      current.status = '已记录';
     } else {
       current.title = event.kind || current.title;
     }
@@ -534,13 +543,33 @@ function buildToolActivityCards(thread) {
     .slice(-24);
 }
 
+function buildToolFallbackEntries(thread) {
+  const events = (thread?.details?.events || []).filter((event) => isToolEvent(event)).slice(-80);
+  return events.map((event, index) => ({
+    id: `${event.threadId || ''}:${event.turnId || ''}:${event.itemId || event.callId || index}:${event.kind || 'tool'}`,
+    title: event.method || event.itemType || event.kind || '工具调用',
+    status: event.kind === 'item_completed' ? '已完成' : '运行中',
+    updatedAt: event.timestamp || new Date().toISOString(),
+    output: event.output || event.delta || '',
+    method: event.method || null,
+  }));
+}
+
 function buildConversationFeed(thread) {
-  const messages = sortedMessages(thread).map((message) => ({
+  const messages = sortedMessages(thread)
+    .filter((message) => {
+      if (!message) return false;
+      if (message.role === 'reasoning') return Boolean(normalizeThinkingText(message.text || message.summaryText || ''));
+      return Boolean(String(message.text || '').trim());
+    })
+    .map((message) => ({
     type: 'message',
     timestamp: toTimestampMs(message.createdAt || message.updatedAt),
     item: message,
-  }));
-  const tools = buildToolActivityCards(thread).map((card) => ({
+    }));
+  const toolCards = buildToolActivityCards(thread);
+  const effectiveTools = toolCards.length > 0 ? toolCards : buildToolFallbackEntries(thread);
+  const tools = effectiveTools.map((card) => ({
     type: 'tool',
     timestamp: toTimestampMs(card.updatedAt),
     item: card,
@@ -1165,8 +1194,10 @@ function renderHeader() {
         <span class="statusBadge ${statusClass(state.session.status.proxy)}">代理：${escapeHtml(statusText(state.session.status.proxy))}</span>
         <span class="statusBadge ${statusClass(state.session.status.appServer)}">app-server：${escapeHtml(statusText(state.session.status.appServer))}</span>
         <span class="statusBadge ${statusClass(state.session.status.web)}">Web：${escapeHtml(statusText(state.session.status.web))}</span>
-        <button id="takeover" class="button secondary">接管控制</button>
-        <button id="refresh" class="button secondary">刷新</button>
+        <div class="headerControlRow">
+          <button id="takeover" class="button secondary headerActionBtn">接管控制</button>
+          <button id="refresh" class="button secondary headerActionBtn">刷新</button>
+        </div>
       </div>
     </div>
   `;
@@ -1233,26 +1264,25 @@ function renderSidebar() {
 function renderConversation(thread) {
   const feed = buildConversationFeed(thread);
   const busy = isThreadBusy(thread);
+  const lastTimestamp = feed.length > 0 ? feed[feed.length - 1].timestamp : null;
+  const threadMiniTitle = thread ? escapeHtml(thread.title || compactId(thread.id, 12, 8)) : '未选择线程';
   return h`
     <div class="panel">
       <div class="panelTitle">
         <h2>对话</h2>
-        <div class="toolbar">
-          <span class="panelSubtle">${thread ? escapeHtml(thread.title || thread.id) : '未选择线程'}</span>
-          <button id="toggle-timeline" class="button secondary">${state.showTimeline ? '隐藏时间线' : '显示时间线'}</button>
-        </div>
       </div>
       ${thread ? `
         <div class="messageList scrollArea">
+          <div class="conversationMiniTitle">${threadMiniTitle}</div>
           ${feed.map((entry) => {
             if (entry.type === 'tool') return renderToolCall(entry.item);
             if (entry.item.role === 'reasoning') return renderThinking(entry.item);
+            if (isFileChangeMessage(entry.item)) return renderFileChangeMessage(entry.item);
             return renderMessageBlock(entry.item);
           }).join('')}
           ${busy ? `
             <div class="messageEvent waiting">
               <div class="messageEventMeta">
-                <span>助手</span>
                 <span>处理中</span>
               </div>
               <div class="waitingRow">
@@ -1262,6 +1292,7 @@ function renderConversation(thread) {
             </div>
           ` : ''}
           ${(!feed.length && !busy) ? '<div class="emptyState">暂无消息。</div>' : ''}
+          ${lastTimestamp ? `<div class="conversationTailTime">${escapeHtml(formatTime(lastTimestamp))}</div>` : ''}
         </div>
         ${state.showTimeline ? `
           <div class="detailSection timelineWrap">
@@ -1470,7 +1501,7 @@ function renderLogs() {
   const statusStats = Object.entries(state.interceptedStatusStats || {}).sort((a, b) => Number(a[0]) - Number(b[0]));
 
   return h`
-    <div class="panel">
+    <div class="panel logsPanel">
       <div class="panelTitle">
         <h2>日志中心</h2>
         <div class="toolbar">
@@ -1491,8 +1522,8 @@ function renderLogs() {
           ${statusStats.map(([code, count]) => `<span class="pill">${escapeHtml(code)} · ${count}</span>`).join('') || '<span class="panelSubtle">暂无状态码数据</span>'}
         </div>
       </div>
-      <div class="contentSplit" style="margin-top: 10px;">
-        <div class="scrollArea requestList">
+      <div class="contentSplit logsLayout" style="margin-top: 10px;">
+        <div class="scrollArea requestList logsRequestList">
           ${intercepted.map((entry) => `
             <div class="requestCard ${entry.id === state.selectedInterceptedLogId ? 'active' : ''}" data-intercepted-id="${entry.id}">
               <div class="requestTitleRow">
@@ -1504,16 +1535,16 @@ function renderLogs() {
             </div>
           `).join('') || '<div class="emptyState">暂无拦截日志。</div>'}
         </div>
-        <div class="detailPane">
+        <div class="detailPane logsDetailPane scrollArea">
           ${selected ? `
-            <div class="detailSection panelSoft">
+            <div class="detailSection panelSoft logSection">
               <h4>拦截记录（结构化）</h4>
-              <pre>${escapeHtml(JSON.stringify(selected, null, 2))}</pre>
+              <pre class="logPre">${escapeHtml(JSON.stringify(selected, null, 2))}</pre>
             </div>
           ` : '<div class="emptyState">请选择一条拦截记录。</div>'}
-          <div class="detailSection panelSoft">
+          <div class="detailSection panelSoft logSection">
             <h4>错误日志</h4>
-            <div class="logList">
+            <div class="logList scrollArea">
               ${errorLogs.map((entry) => `
                 <div class="logLine">
                   <span class="pill ${statusClass(entry.level)}">${escapeHtml(entry.level || 'LOG')}</span>
@@ -1523,9 +1554,9 @@ function renderLogs() {
               `).join('') || '<div class="emptyState">暂无错误日志。</div>'}
             </div>
           </div>
-          <div class="detailSection panelSoft">
+          <div class="detailSection panelSoft logSection">
             <h4>拦截原始 JSONL（尾部）</h4>
-            <pre>${escapeHtml((state.interceptedRawLines || []).slice(-120).join('\n'))}</pre>
+            <pre class="logPre">${escapeHtml((state.interceptedRawLines || []).slice(-120).join('\n'))}</pre>
           </div>
         </div>
       </div>
@@ -1622,19 +1653,23 @@ function renderMain() {
       ? `线程 ${busyThread?.title || compactId(busyThread?.id || '')} 正在执行，等待结束后再发送。`
       : '');
   const mobile = isMobileViewport();
-  const pendingApprovals = state.approvals.filter((item) => item.status === 'pending').length;
+  if (!mobile && state.mobileDrawerOpen) state.mobileDrawerOpen = false;
   return h`
     <div class="column mainColumn">
       ${mobile ? `
-        <div class="panel mobileQuickPanel">
-          <div class="mobileQuickRow">
-            <button class="button secondary" data-mobile-open="threads">线程 (${state.threads.length})</button>
-            <button class="button secondary" data-tab="approvals">审批 (${pendingApprovals})</button>
-            <button class="button secondary" data-tab="requests">请求 (${state.rawRequests.length})</button>
-            <button class="button secondary" data-tab="logs">日志</button>
-          </div>
-          <div class="mobileCurrentThread">当前：${escapeHtml(selected ? (selected.title || compactId(selected.id, 10, 8)) : '新线程')}</div>
-        </div>
+        <button id="mobile-drawer-toggle" class="mobileDrawerToggle" aria-label="打开抽屉菜单" title="打开菜单">
+          <span></span><span></span><span></span>
+        </button>
+        ${state.mobileDrawerOpen ? `
+          <div class="mobileDrawerOverlay" data-mobile-drawer-dismiss="1"></div>
+          <aside class="mobileDrawerPanel">
+            <div class="mobileDrawerActions">
+              <button class="button secondary" data-mobile-drawer-open="threads">线程 (${state.threads.length})</button>
+              <button class="button secondary" data-mobile-drawer-open="nav">导航</button>
+              <button class="button secondary" data-mobile-drawer-toggle-timeline="1">${state.showTimeline ? '隐藏时间线' : '显示时间线'}</button>
+            </div>
+          </aside>
+        ` : ''}
       ` : ''}
       <div class="panel mainContentPanel">
         ${state.tab === 'conversation' ? renderConversation(selected) : ''}
@@ -1644,11 +1679,6 @@ function renderMain() {
         ${state.tab === 'logs' ? renderLogs() : ''}
       </div>
       <div class="panel bottomControlPanel">
-        <div class="panelTitle" style="margin-top: 8px;">
-          <h2>${shouldShowAskUserComposer ? '待处理交互' : '输入区'}</h2>
-          <span class="panelSubtle">${selected ? `发送到 ${escapeHtml(selected.title || selected.id)}` : '当前未选择线程：发送后将自动创建新线程'}</span>
-        </div>
-        ${selected ? '<div class="notice">你正在继续当前已选线程。</div>' : ''}
         ${lockReason ? `<div class="notice">${escapeHtml(lockReason)}</div>` : ''}
         ${shouldShowAskUserComposer ? renderAskUserComposer(askUserContext) : `
           <div class="composerInputRow">
@@ -1661,11 +1691,13 @@ function renderMain() {
           </div>
           <div class="panelSubtle composerHint">Enter 发送 · Shift+Enter 换行（中文输入法回车选字不会发送）</div>
         `}
-        <div class="tabs bottomTabs" style="margin-top: 10px;">
-          ${['conversation', 'requests', 'approvals', 'commands', 'logs'].map((tab) => `
-            <button class="button tabButton ${state.tab === tab ? 'active' : ''}" data-tab="${tab}">${tabLabel(tab)}</button>
-          `).join('')}
-        </div>
+        ${mobile ? '' : `
+          <div class="tabs bottomTabs" style="margin-top: 10px;">
+            ${['conversation', 'requests', 'approvals', 'commands', 'logs'].map((tab) => `
+              <button class="button tabButton ${state.tab === tab ? 'active' : ''}" data-tab="${tab}">${tabLabel(tab)}</button>
+            `).join('')}
+          </div>
+        `}
       </div>
     </div>
   `;
@@ -1726,11 +1758,23 @@ function renderModal() {
         `).join('') || '<div class="emptyState">暂无线程。</div>'}
       </div>
     `;
+  } else if (state.modal === 'nav') {
+    title = '导航';
+    subtitle = `当前：${tabLabel(state.tab)}`;
+    body = `
+      <div class="mobileNavList">
+        <button class="button secondary mobileNavButton ${state.tab === 'conversation' ? 'active' : ''}" data-modal-tab="conversation">对话</button>
+        <button class="button secondary mobileNavButton ${state.tab === 'approvals' ? 'active' : ''}" data-modal-tab="approvals">审批 (${state.approvals.filter((item) => item.status === 'pending').length})</button>
+        <button class="button secondary mobileNavButton ${state.tab === 'requests' ? 'active' : ''}" data-modal-tab="requests">请求 (${state.rawRequests.length})</button>
+        <button class="button secondary mobileNavButton ${state.tab === 'commands' ? 'active' : ''}" data-modal-tab="commands">命令</button>
+        <button class="button secondary mobileNavButton ${state.tab === 'logs' ? 'active' : ''}" data-modal-tab="logs">日志</button>
+      </div>
+    `;
   }
 
   return h`
     <div class="modalOverlay" data-modal-dismiss="1">
-      <div class="modalCard" role="dialog" aria-modal="true" aria-label="${escapeHtml(title)}">
+      <div class="modalCard ${state.modal === 'nav' ? 'drawerCard' : ''}" role="dialog" aria-modal="true" aria-label="${escapeHtml(title)}">
         <div class="panelTitle">
           <div>
             <h2>${escapeHtml(title)}</h2>
@@ -1923,7 +1967,41 @@ function bindActions() {
 
   document.querySelectorAll('[data-mobile-open]').forEach((node) => {
     node.onclick = () => {
+      state.mobileDrawerOpen = false;
       state.modal = node.dataset.mobileOpen || null;
+      render();
+    };
+  });
+
+  const mobileDrawerToggle = document.querySelector('#mobile-drawer-toggle');
+  if (mobileDrawerToggle) {
+    mobileDrawerToggle.onclick = () => {
+      state.mobileDrawerOpen = !state.mobileDrawerOpen;
+      render();
+    };
+  }
+
+  document.querySelectorAll('[data-mobile-drawer-dismiss]').forEach((node) => {
+    node.onclick = () => {
+      state.mobileDrawerOpen = false;
+      render();
+    };
+  });
+
+  document.querySelectorAll('[data-mobile-drawer-open]').forEach((node) => {
+    node.onclick = () => {
+      const target = node.dataset.mobileDrawerOpen;
+      if (!target) return;
+      state.mobileDrawerOpen = false;
+      state.modal = target;
+      render();
+    };
+  });
+
+  document.querySelectorAll('[data-mobile-drawer-toggle-timeline]').forEach((node) => {
+    node.onclick = () => {
+      state.showTimeline = !state.showTimeline;
+      state.mobileDrawerOpen = false;
       render();
     };
   });
@@ -1999,6 +2077,24 @@ function bindActions() {
         await loadThread(selected.id);
       }
       if (node.dataset.tab === 'logs') {
+        await loadLogsData();
+      }
+      render();
+    };
+  });
+
+  document.querySelectorAll('[data-modal-tab]').forEach((node) => {
+    node.onclick = async () => {
+      const nextTab = node.dataset.modalTab;
+      if (!nextTab) return;
+      setActiveTab(nextTab);
+      state.scrollIntent[nextTab] = true;
+      state.modal = null;
+      const selected = getSelectedThread();
+      if (selected && needsThreadHistory(selected)) {
+        await loadThread(selected.id);
+      }
+      if (nextTab === 'logs') {
         await loadLogsData();
       }
       render();
@@ -2142,13 +2238,6 @@ function bindActions() {
     };
   }
 
-  const toggleTimeline = document.querySelector('#toggle-timeline');
-  if (toggleTimeline) {
-    toggleTimeline.onclick = () => {
-      state.showTimeline = !state.showTimeline;
-      render();
-    };
-  }
 }
 
 async function loadLogsData({ limit = 0 } = {}) {
