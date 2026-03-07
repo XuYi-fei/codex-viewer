@@ -132,7 +132,62 @@ function extractApprovalTurnId(params = {}) {
     || null;
 }
 
+function normalizeApprovalMethodKey(method = '') {
+  return String(method || '')
+    .trim()
+    .replaceAll('.', '/')
+    .replaceAll('-', '/')
+    .toLowerCase();
+}
+
+function approvalBridgeKey({ threadId, turnId = null, method = '' }) {
+  return `${threadId || '-'}|${turnId || '-'}|${normalizeApprovalMethodKey(method)}`;
+}
+
+const pendingApprovalBridgeChecks = new Map();
+
+function clearApprovalBridgeCheck({ threadId, turnId = null, method = '' }) {
+  const key = approvalBridgeKey({ threadId, turnId, method });
+  const timer = pendingApprovalBridgeChecks.get(key);
+  if (!timer) return;
+  clearTimeout(timer);
+  pendingApprovalBridgeChecks.delete(key);
+}
+
+function scheduleApprovalBridgeCheck({ threadId, turnId = null, method = '', timestamp = nowIso() }) {
+  if (!threadId || !method) return;
+  clearApprovalBridgeCheck({ threadId, turnId, method });
+  const key = approvalBridgeKey({ threadId, turnId, method });
+  const timer = setTimeout(() => {
+    pendingApprovalBridgeChecks.delete(key);
+    const methodKey = normalizeApprovalMethodKey(method);
+    const pendingMatch = store.getApprovals()
+      .filter((entry) => entry.status === 'pending')
+      .some((entry) => {
+        if (entry.threadId !== threadId) return false;
+        if (turnId && entry.turnId && entry.turnId !== turnId) return false;
+        return normalizeApprovalMethodKey(entry.method || '') === methodKey;
+      });
+    if (pendingMatch) return;
+    store.emit({
+      type: 'diagnostic',
+      payload: {
+        stream: 'approval',
+        text: `missing-server-request method=${method} threadId=${threadId || '-'} turnId=${turnId || '-'} ts=${timestamp}`,
+      },
+      timestamp: nowIso(),
+    });
+  }, 2000);
+  pendingApprovalBridgeChecks.set(key, timer);
+}
+
 appServerClient.on('notification', ({ method, params, timestamp }) => {
+  if (String(method || '').toLowerCase().includes('requestapproval')) {
+    const threadId = extractApprovalThreadId(params || {});
+    const turnId = extractApprovalTurnId(params || {});
+    scheduleApprovalBridgeCheck({ threadId, turnId, method, timestamp });
+  }
+
   if (method === 'thread/started' && params?.thread) {
     store.upsertThread(params.thread);
     return;
@@ -256,6 +311,7 @@ appServerClient.on('response', ({ method, result }) => {
 appServerClient.on('serverRequest', ({ requestId, method, params, timestamp }) => {
   const threadId = extractApprovalThreadId(params || {});
   const turnId = extractApprovalTurnId(params || {});
+  clearApprovalBridgeCheck({ threadId, turnId, method });
   const normalizedApprovalId = String(requestId);
   const approval = {
     id: normalizedApprovalId,

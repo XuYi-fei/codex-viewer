@@ -156,23 +156,26 @@ export class AppServerClient extends EventEmitter {
       return;
     }
 
-    if (message.id && this.requestMap.has(message.id) && Object.prototype.hasOwnProperty.call(message, 'result')) {
-      const pending = this.requestMap.get(message.id);
-      this.requestMap.delete(message.id);
+    const hasId = Object.prototype.hasOwnProperty.call(message, 'id');
+    const messageId = hasId ? message.id : undefined;
+
+    if (hasId && this.requestMap.has(messageId) && Object.prototype.hasOwnProperty.call(message, 'result')) {
+      const pending = this.requestMap.get(messageId);
+      this.requestMap.delete(messageId);
       pending.resolve(message.result);
       this.emit('response', { method: pending.method, result: message.result, timestamp: nowIso() });
       return;
     }
-    if (message.id && this.requestMap.has(message.id) && message.error) {
-      const pending = this.requestMap.get(message.id);
-      this.requestMap.delete(message.id);
+    if (hasId && this.requestMap.has(messageId) && message.error) {
+      const pending = this.requestMap.get(messageId);
+      this.requestMap.delete(messageId);
       pending.reject(new Error(message.error.message || JSON.stringify(message.error)));
       return;
     }
 
-    if (message.id && message.method) {
-      this.pendingApprovals.set(message.id, message);
-      this.emit('serverRequest', { requestId: message.id, method: message.method, params: message.params, timestamp: nowIso() });
+    if (hasId && message.method) {
+      this.pendingApprovals.set(messageId, message);
+      this.emit('serverRequest', { requestId: messageId, method: message.method, params: message.params, timestamp: nowIso() });
       return;
     }
 

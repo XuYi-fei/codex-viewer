@@ -1164,6 +1164,18 @@ function pendingApprovalsForSelectedThread() {
     .sort((a, b) => new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime());
 }
 
+function getLatestToolApprovalEvent(thread) {
+  const events = thread?.details?.events || [];
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (String(event?.kind || '') !== 'tool_event') continue;
+    const method = canonicalApprovalMethod(event?.method || '');
+    if (!isCommandApprovalMethod(method) && !isFileApprovalMethod(method)) continue;
+    return event;
+  }
+  return null;
+}
+
 function getActiveInteractionContext() {
   const selectedThread = getSelectedThread();
   const selectedThreadId = selectedThread?.id || state.selectedThreadId || null;
@@ -1192,6 +1204,60 @@ function getActiveInteractionContext() {
   };
 }
 
+function getToolEventApprovalFallbackContext() {
+  const selectedThread = getSelectedThread();
+  if (!selectedThread || !isThreadBusy(selectedThread)) return null;
+  const fallbackEvent = getLatestToolApprovalEvent(selectedThread);
+  if (!fallbackEvent) return null;
+  const eventTs = toTimestampMs(fallbackEvent.timestamp);
+  if (eventTs && (Date.now() - eventTs) > 5 * 60 * 1000) return null;
+  return {
+    source: 'tool_event',
+    event: fallbackEvent,
+  };
+}
+
+function getCurrentInteractionContext() {
+  const primary = getActiveInteractionContext();
+  if (primary) return primary;
+  return getToolEventApprovalFallbackContext();
+}
+
+function describeToolApprovalFallbackEvent(event = {}) {
+  const method = canonicalApprovalMethod(event?.method || '');
+  const params = event?.params && typeof event.params === 'object' ? event.params : {};
+  const command = firstDefined(
+    params.command,
+    params.commandLine,
+    params.command_line,
+    params.cmd,
+    params.patch,
+  );
+  const reason = firstDefined(
+    params.reason,
+    params.message,
+    params.prompt,
+    params.explanation,
+  );
+  const availableDecisions = Array.isArray(params.availableDecisions)
+    ? params.availableDecisions
+    : (Array.isArray(params.actions) ? params.actions : []);
+  return {
+    method,
+    command: command ? String(command) : '',
+    reason: reason ? String(reason) : '',
+    availableDecisions: availableDecisions
+      .map((entry) => {
+        if (typeof entry === 'string') return entry;
+        if (entry && typeof entry === 'object') {
+          return String(entry.decision || entry.name || entry.label || entry.action || '').trim();
+        }
+        return '';
+      })
+      .filter(Boolean),
+  };
+}
+
 function pruneAskUserDrafts() {
   const pendingIds = new Set(
     state.approvals
@@ -1206,7 +1272,7 @@ function pruneAskUserDrafts() {
 }
 
 function focusConversationForAskUser() {
-  const context = getActiveInteractionContext();
+  const context = getCurrentInteractionContext();
   if (!context) return;
   if (state.tab !== 'conversation') setActiveTab('conversation');
   state.scrollIntent.conversation = true;
@@ -2295,6 +2361,26 @@ function renderInteractionComposer(context) {
   if (context.source === 'network') {
     return renderAskUserComposer(context);
   }
+  if (context.source === 'tool_event') {
+    const fallback = describeToolApprovalFallbackEvent(context.event || {});
+    return h`
+      <div class="askUserComposer networkOnly">
+        <div class="askUserHeader">
+          <span class="pill status-starting">需要操作</span>
+          <span class="panelSubtle">仅检测到工具审批事件</span>
+        </div>
+        <div class="notice askNotice" style="margin-bottom: 8px;">
+          检测到审批事件，但控制面未返回可回调审批 ID，当前无法在网页提交审批。
+        </div>
+        <div class="panelSubtle">
+          方法：${escapeHtml(fallback.method || context.event?.method || '未知')}
+        </div>
+        ${fallback.reason ? `<div class="panelSubtle">原因：${escapeHtml(compactText(fallback.reason, 220))}</div>` : ''}
+        ${fallback.command ? `<div class="panelSubtle">内容：${escapeHtml(compactText(fallback.command, 220))}</div>` : ''}
+        ${fallback.availableDecisions.length ? `<div class="panelSubtle">可选决策：${escapeHtml(fallback.availableDecisions.join(' / '))}</div>` : ''}
+      </div>
+    `;
+  }
   const approval = context.approval;
   if (!approval) return '';
   const method = canonicalApprovalMethod(approval.method);
@@ -2318,20 +2404,23 @@ function renderMain() {
   const selected = getSelectedThread();
   const busyThread = getSelectedBusyThread();
   const isBusy = Boolean(busyThread);
-  const interactionContext = getActiveInteractionContext();
-  const activeInteractionApproval = interactionContext?.source === 'approval' ? interactionContext.approval : null;
-  const networkOnlyInteraction = interactionContext?.source === 'network';
-  const shouldShowInteractionComposer = Boolean(activeInteractionApproval);
-  const hasBlockingApproval = Boolean(activeInteractionApproval);
+  const interactionContext = getCurrentInteractionContext();
+  const shouldShowInteractionComposer = Boolean(interactionContext);
+  const hasBlockingInteraction = Boolean(interactionContext);
   const isReadOnly = state.session?.viewerRole !== 'controller';
-  const composerDisabled = state.sendingPrompt || isBusy || hasBlockingApproval || isReadOnly;
-  const lockReason = isReadOnly
-    ? '当前浏览器是只读模式，请先点击“接管控制”。'
-    : (hasBlockingApproval
-      ? `线程 ${selected?.title || compactId(selected?.id || '')} 存在待处理审批，请先完成交互。`
-      : (isBusy
-      ? `线程 ${busyThread?.title || compactId(busyThread?.id || '')} 正在执行，等待结束后再发送。`
-      : ''));
+  const composerDisabled = state.sendingPrompt || isBusy || hasBlockingInteraction || isReadOnly;
+  let lockReason = '';
+  if (isReadOnly) {
+    lockReason = '当前浏览器是只读模式，请先点击“接管控制”。';
+  } else if (interactionContext?.source === 'approval') {
+    lockReason = `线程 ${selected?.title || compactId(selected?.id || '')} 存在待处理审批，请先完成交互。`;
+  } else if (interactionContext?.source === 'network') {
+    lockReason = '检测到 ask-user 交互，等待控制面同步审批 ID 后可提交回答。';
+  } else if (interactionContext?.source === 'tool_event') {
+    lockReason = '检测到审批事件但无可回调审批 ID，请先在原生终端处理该审批。';
+  } else if (isBusy) {
+    lockReason = `线程 ${busyThread?.title || compactId(busyThread?.id || '')} 正在执行，等待结束后再发送。`;
+  }
   const mobile = isMobileViewport();
   if (!mobile && state.mobileDrawerOpen) state.mobileDrawerOpen = false;
   return h`
@@ -2360,7 +2449,6 @@ function renderMain() {
       </div>
       <div class="panel bottomControlPanel">
         ${lockReason ? `<div class="notice">${escapeHtml(lockReason)}</div>` : ''}
-        ${networkOnlyInteraction ? '<div class="notice askNotice">已识别到可能的 ask-user 请求，等待控制面审批 ID 同步后可直接作答。</div>' : ''}
         ${shouldShowInteractionComposer ? renderInteractionComposer(interactionContext) : `
           <div class="composerInputRow">
             <textarea id="prompt-input" placeholder="在这里输入指令（电脑/手机均可）..." ${composerDisabled ? 'disabled' : ''}>${escapeHtml(state.prompt)}</textarea>
@@ -2855,10 +2943,18 @@ function bindActions() {
       alert(`线程 ${busyThread.title || compactId(busyThread.id)} 仍在执行中，请等待完成后再发送。`);
       return;
     }
-    const interactionContext = getActiveInteractionContext();
+    const interactionContext = getCurrentInteractionContext();
     const blockingApproval = interactionContext?.source === 'approval' ? interactionContext.approval : null;
     if (blockingApproval) {
       alert(`当前线程存在待处理审批（${approvalMethodLabel(blockingApproval)}），请先完成该交互。`);
+      return;
+    }
+    if (interactionContext?.source === 'network') {
+      alert('检测到 ask-user 交互，等待控制面审批 ID 同步后再提交回答。');
+      return;
+    }
+    if (interactionContext?.source === 'tool_event') {
+      alert('检测到审批事件但缺少可回调审批 ID，请先在原生终端处理该审批。');
       return;
     }
     const prompt = document.querySelector('#prompt-input')?.value.trim();
