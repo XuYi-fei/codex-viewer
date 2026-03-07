@@ -200,8 +200,8 @@ function renderThinking(message) {
   const expandedBody = message.text || '';
   const hasDetails = expandedBody && expandedBody !== (message.summaryText || '');
   return `
-    <div class="messageBubble reasoning compact">
-      <div class="messageMeta">
+    <div class="messageEvent thinking">
+      <div class="messageEventMeta">
         <span>思考</span>
         <span>${escapeHtml(message.status || '进行中')}</span>
       </div>
@@ -216,6 +216,35 @@ function renderThinking(message) {
           <pre>${escapeHtml(expandedBody)}</pre>
         </details>
       ` : ''}
+    </div>
+  `;
+}
+
+function renderMessageBlock(message) {
+  return `
+    <div class="messageBlock ${message.role === 'user' ? 'user' : 'assistant'}">
+      <div class="messageMeta plain">
+        <span>${escapeHtml(messageRoleLabel(message.role))}</span>
+        <span>${escapeHtml(formatTime(message.updatedAt))}</span>
+      </div>
+      <div class="messageBodyText">
+        ${message.role === 'assistant'
+          ? `<div class="markdownContent">${renderMarkdown(message.text || '')}</div>`
+          : `<div class="plainUserText">${escapeHtml(message.text || '')}</div>`}
+      </div>
+    </div>
+  `;
+}
+
+function renderToolCall(card) {
+  return `
+    <div class="messageEvent tool ${card.status === '已完成' ? 'done' : 'running'}">
+      <div class="messageEventMeta">
+        <span>${escapeHtml(card.title || '工具调用')}</span>
+        <span>${escapeHtml(card.status || '运行中')}</span>
+      </div>
+      <div class="toolSummary">${escapeHtml(formatTime(card.updatedAt))}</div>
+      ${card.output ? `<pre>${escapeHtml(compactText(card.output, 180))}</pre>` : ''}
     </div>
   `;
 }
@@ -503,6 +532,20 @@ function buildToolActivityCards(thread) {
   return [...cards.values()]
     .sort((left, right) => new Date(left.updatedAt || 0).getTime() - new Date(right.updatedAt || 0).getTime())
     .slice(-24);
+}
+
+function buildConversationFeed(thread) {
+  const messages = sortedMessages(thread).map((message) => ({
+    type: 'message',
+    timestamp: toTimestampMs(message.createdAt || message.updatedAt),
+    item: message,
+  }));
+  const tools = buildToolActivityCards(thread).map((card) => ({
+    type: 'tool',
+    timestamp: toTimestampMs(card.updatedAt),
+    item: card,
+  }));
+  return [...messages, ...tools].sort((left, right) => left.timestamp - right.timestamp);
 }
 
 function firstUserMessageText(thread) {
@@ -1188,8 +1231,7 @@ function renderSidebar() {
 }
 
 function renderConversation(thread) {
-  const messages = sortedMessages(thread);
-  const toolCards = buildToolActivityCards(thread);
+  const feed = buildConversationFeed(thread);
   const busy = isThreadBusy(thread);
   return h`
     <div class="panel">
@@ -1202,42 +1244,14 @@ function renderConversation(thread) {
       </div>
       ${thread ? `
         <div class="messageList scrollArea">
-          ${messages.map((message) => {
-            if (message.role === 'reasoning') {
-              return renderThinking(message);
-            }
-            return `
-              <div class="messageBubble ${message.role === 'user' ? 'user' : 'assistant'}">
-                <div class="messageMeta">
-                  <span>${escapeHtml(messageRoleLabel(message.role))}</span>
-                  <span>${escapeHtml(formatTime(message.updatedAt))}</span>
-                </div>
-                ${message.role === 'assistant'
-                  ? `<div class="markdownContent">${renderMarkdown(message.text || '')}</div>`
-                  : `<pre>${escapeHtml(message.text || '')}</pre>`}
-              </div>
-            `;
+          ${feed.map((entry) => {
+            if (entry.type === 'tool') return renderToolCall(entry.item);
+            if (entry.item.role === 'reasoning') return renderThinking(entry.item);
+            return renderMessageBlock(entry.item);
           }).join('')}
-          ${toolCards.length ? `
-            <div class="toolActivityWrap">
-              <div class="toolActivityTitle">工具调用</div>
-              <div class="toolActivityList">
-                ${toolCards.map((card) => `
-                  <div class="toolActivityCard ${card.status === '已完成' ? 'done' : 'running'}">
-                    <div class="toolActivityHead">
-                      <strong>${escapeHtml(card.title || '工具调用')}</strong>
-                      <span class="pill ${card.status === '已完成' ? 'status-ready' : 'status-starting'}">${escapeHtml(card.status || '运行中')}</span>
-                    </div>
-                    <div class="panelSubtle">${escapeHtml(formatTime(card.updatedAt))}</div>
-                    ${card.output ? `<pre>${escapeHtml(compactText(card.output, 240))}</pre>` : ''}
-                  </div>
-                `).join('')}
-              </div>
-            </div>
-          ` : ''}
           ${busy ? `
-            <div class="messageBubble assistant waiting">
-              <div class="messageMeta">
+            <div class="messageEvent waiting">
+              <div class="messageEventMeta">
                 <span>助手</span>
                 <span>处理中</span>
               </div>
@@ -1247,7 +1261,7 @@ function renderConversation(thread) {
               </div>
             </div>
           ` : ''}
-          ${(!messages.length && !toolCards.length && !busy) ? '<div class="emptyState">暂无消息。</div>' : ''}
+          ${(!feed.length && !busy) ? '<div class="emptyState">暂无消息。</div>' : ''}
         </div>
         ${state.showTimeline ? `
           <div class="detailSection timelineWrap">
