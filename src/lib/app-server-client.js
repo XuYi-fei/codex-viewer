@@ -130,8 +130,8 @@ export class AppServerClient extends EventEmitter {
     });
   }
 
-  async interruptTurn(threadId) {
-    return this.request('turn/interrupt', { threadId });
+  async interruptTurn({ threadId, turnId }) {
+    return this.request('turn/interrupt', { threadId, turnId });
   }
 
   async resolveApproval(id, result) {

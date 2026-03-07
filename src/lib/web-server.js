@@ -80,6 +80,57 @@ function extractThread(result) {
   return result?.thread || result?.data?.thread || result?.data || result || null;
 }
 
+function normalizeStatus(status) {
+  if (status == null) return '';
+  if (typeof status === 'string') return status.toLowerCase();
+  if (typeof status === 'object' && typeof status.type === 'string') return status.type.toLowerCase();
+  return String(status).toLowerCase();
+}
+
+function isInProgressStatus(status) {
+  const text = normalizeStatus(status);
+  if (!text) return false;
+  if (
+    text === 'completed'
+    || text === 'idle'
+    || text === 'done'
+    || text === 'failed'
+    || text === 'cancelled'
+    || text === 'canceled'
+    || text === 'interrupted'
+    || text === 'error'
+    || text === 'ready'
+  ) {
+    return false;
+  }
+  return (
+    text.includes('progress')
+    || text.includes('running')
+    || text.includes('active')
+    || text.includes('stream')
+    || text === 'busy'
+  );
+}
+
+function resolveTurnIdFromThread(thread = null) {
+  if (!thread || typeof thread !== 'object') return null;
+  if (thread.activeTurnId) return thread.activeTurnId;
+
+  const raw = thread.raw && typeof thread.raw === 'object' ? thread.raw : thread;
+  const turns = Array.isArray(raw.turns) ? raw.turns : [];
+  if (turns.length === 0) return null;
+
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    const turn = turns[index];
+    if (!turn?.id) continue;
+    if (isInProgressStatus(turn.status)) return turn.id;
+  }
+
+  const latestTurn = turns[turns.length - 1];
+  if (latestTurn?.id) return latestTurn.id;
+  return null;
+}
+
 function readLogLines(filePath, limit = 400) {
   if (!filePath || !existsSync(filePath)) return [];
   try {
@@ -142,6 +193,38 @@ export function createWebServer({ port, host = '127.0.0.1', publicDir, authManag
     }
     res.setHeader('set-cookie', authManager.cookieFor(session));
     return session;
+  }
+
+  async function readAndHydrateThread(threadId) {
+    const result = await appServerClient.readThread(threadId);
+    const raw = extractThread(result);
+    if (!raw?.id) return null;
+    return store.hydrateThread(raw) || store.getThread(threadId) || null;
+  }
+
+  async function resolveInterruptContext(threadId, initialThread, requestTs) {
+    let thread = initialThread || null;
+    let turnId = resolveTurnIdFromThread(thread);
+    if (turnId) return { thread, turnId };
+
+    try {
+      const hydrated = await readAndHydrateThread(threadId);
+      if (hydrated) {
+        thread = hydrated;
+        turnId = resolveTurnIdFromThread(hydrated);
+      }
+    } catch (error) {
+      store.emit({
+        type: 'diagnostic',
+        payload: {
+          stream: 'web-server',
+          text: `interrupt-resolve-turn ${threadId}: ${error?.message || String(error)}`,
+        },
+        timestamp: requestTs,
+      });
+    }
+
+    return { thread, turnId: turnId || null };
   }
 
   const server = createServer(async (req, res) => {
@@ -262,28 +345,34 @@ export function createWebServer({ port, host = '127.0.0.1', publicDir, authManag
         return;
       }
       const requestTs = new Date().toISOString();
-      const turnId = thread.activeTurnId || null;
+      const interruptContext = await resolveInterruptContext(threadId, thread, requestTs);
+      const turnId = interruptContext.turnId || null;
+      if (!turnId) {
+        send(res, json({
+          error: 'Interrupt failed: missing active turnId. You can remove this thread from viewer list to clear local state.',
+          interrupted: false,
+          threadBusy: Boolean(interruptContext.thread?.isBusy),
+          interruptError: 'missing field turnId',
+        }, 502));
+        return;
+      }
       let interruptAccepted = false;
       let interruptError = null;
       try {
-        await appServerClient.interruptTurn(threadId);
+        await appServerClient.interruptTurn({ threadId, turnId });
         interruptAccepted = true;
       } catch (error) {
         interruptError = error?.message || String(error);
         store.emit({
           type: 'diagnostic',
-          payload: { stream: 'web-server', text: `interrupt ${threadId}: ${interruptError}` },
+          payload: { stream: 'web-server', text: `interrupt ${threadId} turn=${turnId}: ${interruptError}` },
           timestamp: requestTs,
         });
       }
 
-      let latestThread = store.getThread(threadId) || thread;
+      let latestThread = store.getThread(threadId) || interruptContext.thread || thread;
       try {
-        const readResult = await appServerClient.readThread(threadId);
-        const rawThread = extractThread(readResult);
-        if (rawThread?.id) {
-          latestThread = store.hydrateThread(rawThread) || latestThread;
-        }
+        latestThread = (await readAndHydrateThread(threadId)) || latestThread;
       } catch (error) {
         const readError = error?.message || String(error);
         store.emit({
@@ -358,15 +447,22 @@ export function createWebServer({ port, host = '127.0.0.1', publicDir, authManag
       let interrupted = false;
       let interruptError = null;
       if (thread.isBusy) {
+        const requestTs = new Date().toISOString();
+        const interruptContext = await resolveInterruptContext(threadId, thread, requestTs);
+        const turnId = interruptContext.turnId || null;
         try {
-          await appServerClient.interruptTurn(threadId);
-          interrupted = true;
+          if (!turnId) {
+            interruptError = 'missing field turnId';
+          } else {
+            await appServerClient.interruptTurn({ threadId, turnId });
+            interrupted = true;
+          }
         } catch (error) {
           interruptError = error?.message || String(error);
           store.emit({
             type: 'diagnostic',
-            payload: { stream: 'web-server', text: `interrupt-before-remove ${threadId}: ${interruptError}` },
-            timestamp: new Date().toISOString(),
+            payload: { stream: 'web-server', text: `interrupt-before-remove ${threadId} turn=${turnId || '-'}: ${interruptError}` },
+            timestamp: requestTs,
           });
         }
       }
