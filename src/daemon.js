@@ -123,8 +123,54 @@ appServerClient.on('notification', ({ method, params, timestamp }) => {
   }
   if (method === 'turn/started') {
     if (params?.threadId) {
+      store.markTurnStarted({ threadId: params.threadId, turnId: params.turnId, timestamp });
       store.addThreadEvent(params.threadId, { kind: 'turn_started', timestamp, ...params });
     }
+    return;
+  }
+  if (method === 'turn/completed') {
+    if (params?.threadId) {
+      store.markTurnCompleted({ threadId: params.threadId, turnId: params.turnId, status: 'completed', timestamp });
+      store.addThreadEvent(params.threadId, { kind: 'turn/completed', timestamp, ...params });
+    }
+    return;
+  }
+  if (method === 'turn/failed' || method === 'turn/cancelled' || method === 'turn/interrupted') {
+    if (params?.threadId) {
+      const finalStatus = method.split('/')[1] || 'failed';
+      store.markTurnCompleted({ threadId: params.threadId, turnId: params.turnId, status: finalStatus, timestamp });
+      store.addThreadEvent(params.threadId, { kind: method, timestamp, ...params });
+    }
+    return;
+  }
+  if (method === 'thread/status/changed' && params?.threadId) {
+    const statusText = String(params.status?.type || params.status || '').toLowerCase();
+    if (
+      statusText.includes('progress')
+      || statusText.includes('running')
+      || statusText.includes('active')
+      || statusText.includes('stream')
+    ) {
+      store.markTurnStarted({ threadId: params.threadId, turnId: params.turnId, timestamp });
+    } else {
+      store.markTurnCompleted({ threadId: params.threadId, turnId: params.turnId, status: params.status?.type || params.status || 'completed', timestamp });
+    }
+    store.addThreadEvent(params.threadId, { kind: method, timestamp, ...params });
+    return;
+  }
+  if (method === 'turn/status/changed' && params?.threadId) {
+    const statusText = String(params.status?.type || params.status || '').toLowerCase();
+    if (
+      statusText.includes('progress')
+      || statusText.includes('running')
+      || statusText.includes('active')
+      || statusText.includes('stream')
+    ) {
+      store.markTurnStarted({ threadId: params.threadId, turnId: params.turnId, timestamp });
+    } else {
+      store.markTurnCompleted({ threadId: params.threadId, turnId: params.turnId, status: params.status?.type || params.status || 'completed', timestamp });
+    }
+    store.addThreadEvent(params.threadId, { kind: method, timestamp, ...params });
     return;
   }
   if (method === 'item/started') {
@@ -157,6 +203,14 @@ appServerClient.on('notification', ({ method, params, timestamp }) => {
   }
   if (method === 'item/plan/delta') {
     store.appendPlanDelta({ threadId: params.threadId, turnId: params.turnId, itemId: params.itemId, delta: params.delta });
+    return;
+  }
+  if (params?.threadId && String(method).startsWith('item/') && (
+    String(method).includes('/tool/')
+    || String(method).includes('/commandExecution/')
+    || String(method).includes('/mcp')
+  )) {
+    store.addThreadEvent(params.threadId, { kind: 'tool_event', method, timestamp, ...params });
     return;
   }
   if (params?.threadId) {
@@ -209,7 +263,13 @@ const webServer = createWebServer({
   store,
   logStore,
   appServerClient,
-  runtimeState: { workspacePath, localUrl, publicUrl: effectivePublicUrl },
+  runtimeState: {
+    workspacePath,
+    localUrl,
+    publicUrl: effectivePublicUrl,
+    appLogPath,
+    rawLogPath: runtime.rawLogPath,
+  },
 });
 
 async function main() {

@@ -31,6 +31,46 @@ function extractThread(result) {
   return result?.thread || result?.data?.thread || result?.data || result || null;
 }
 
+function readLogLines(filePath, limit = 400) {
+  if (!filePath || !existsSync(filePath)) return [];
+  try {
+    const text = readFileSync(filePath, 'utf8');
+    const lines = text.split('\n').filter((line) => line.trim());
+    const numericLimit = Number(limit);
+    if (Number.isFinite(numericLimit) && numericLimit <= 0) return lines;
+    const safeLimit = Math.max(1, Math.min(5000, numericLimit || 400));
+    return lines.slice(-safeLimit);
+  } catch {
+    return [];
+  }
+}
+
+function parseAppLogLine(line) {
+  const match = String(line || '').match(/^(\S+)\s+\[([A-Z]+)\]\s+(.+)$/);
+  if (!match) return {
+    timestamp: null,
+    level: 'INFO',
+    message: String(line || ''),
+    raw: String(line || ''),
+  };
+  return {
+    timestamp: match[1],
+    level: match[2],
+    message: match[3],
+    raw: String(line || ''),
+  };
+}
+
+function parseJsonLines(lines = []) {
+  const data = [];
+  for (const line of lines) {
+    try {
+      data.push(JSON.parse(line));
+    } catch {}
+  }
+  return data;
+}
+
 export function createWebServer({ port, host = '127.0.0.1', publicDir, authManager, store, logStore, appServerClient, runtimeState }) {
   const clients = new Set();
 
@@ -183,6 +223,55 @@ export function createWebServer({ port, host = '127.0.0.1', publicDir, authManag
       const limit = Number(url.searchParams.get('limit') || 100);
       const cursor = url.searchParams.get('cursor') || null;
       send(res, json(logStore.list({ limit, cursor })));
+      return;
+    }
+
+    if (pathname === '/api/logs/errors' && req.method === 'GET') {
+      const session = requireAuth(req, res);
+      if (!session) return;
+      const limit = Number(url.searchParams.get('limit') || 500);
+      const levels = String(url.searchParams.get('levels') || 'WARN,ERROR,DIAG')
+        .split(',')
+        .map((entry) => entry.trim().toUpperCase())
+        .filter(Boolean);
+      const allEntries = readLogLines(runtimeState.appLogPath, limit * 3).map((line) => parseAppLogLine(line));
+      const filtered = allEntries
+        .filter((entry) => levels.includes(entry.level))
+        .slice(-Math.max(1, Math.min(5000, limit)));
+      send(res, json({
+        data: filtered,
+        total: filtered.length,
+        source: runtimeState.appLogPath || null,
+      }));
+      return;
+    }
+
+    if (pathname === '/api/logs/intercepted' && req.method === 'GET') {
+      const session = requireAuth(req, res);
+      if (!session) return;
+      const all = url.searchParams.get('all') === '1';
+      const limit = all ? 0 : Number(url.searchParams.get('limit') || 1000);
+      const rawLines = readLogLines(runtimeState.rawLogPath, limit);
+      const data = parseJsonLines(rawLines);
+      const typeStats = {};
+      const statusStats = {};
+      for (const entry of data) {
+        const type = String(entry?.type || 'unknown');
+        typeStats[type] = (typeStats[type] || 0) + 1;
+        const statusCode = entry?.response?.statusCode;
+        if (statusCode != null) {
+          const key = String(statusCode);
+          statusStats[key] = (statusStats[key] || 0) + 1;
+        }
+      }
+      send(res, json({
+        data,
+        typeStats,
+        statusStats,
+        total: data.length,
+        source: runtimeState.rawLogPath || null,
+        rawLines,
+      }));
       return;
     }
 

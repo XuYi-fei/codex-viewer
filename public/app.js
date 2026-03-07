@@ -4,6 +4,12 @@ const state = {
   threads: [],
   approvals: [],
   rawRequests: [],
+  interceptedLogs: [],
+  errorLogs: [],
+  interceptedTypeStats: {},
+  interceptedStatusStats: {},
+  selectedInterceptedLogId: null,
+  interceptedRawLines: [],
   selectedThreadId: localStorage.getItem('codexViewerSelectedThreadId') || null,
   selectedRequestId: null,
   tab: localStorage.getItem('codexViewerTab') || 'conversation',
@@ -23,6 +29,7 @@ const state = {
     requests: true,
     approvals: true,
     commands: true,
+    logs: true,
   },
 };
 
@@ -257,6 +264,7 @@ function statusText(status) {
 function statusClass(status) {
   const text = statusText(status).toLowerCase();
   if (text.includes('ready') || text.includes('idle') || text.includes('completed')) return 'status-ready';
+  if (text.includes('warn')) return 'status-starting';
   if (text.includes('start') || text.includes('active') || text.includes('progress')) return 'status-starting';
   if (text.includes('exit') || text.includes('error') || text.includes('cancel') || text.includes('decline')) return 'status-error';
   return '';
@@ -280,6 +288,7 @@ function tabLabel(tab) {
   if (tab === 'requests') return '请求';
   if (tab === 'approvals') return '审批';
   if (tab === 'commands') return '命令';
+  if (tab === 'logs') return '日志';
   return tab;
 }
 
@@ -388,8 +397,110 @@ function sortedRequests() {
   return [...state.rawRequests].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
 }
 
+function sortedInterceptedLogs() {
+  return [...state.interceptedLogs].sort((a, b) => new Date(b.timestamp || 0).getTime() - new Date(a.timestamp || 0).getTime());
+}
+
+function getSelectedInterceptedLog() {
+  const entries = sortedInterceptedLogs();
+  return entries.find((entry) => entry.id === state.selectedInterceptedLogId) || entries[0] || null;
+}
+
 function sortedMessages(thread) {
   return [...(thread?.details?.messages || [])].sort((a, b) => new Date(a.createdAt || a.updatedAt || 0).getTime() - new Date(b.createdAt || b.updatedAt || 0).getTime());
+}
+
+function isThreadBusy(thread) {
+  if (!thread) return false;
+  if (thread.isBusy === true) return true;
+  const status = String(thread.status || '').toLowerCase();
+  if (
+    status.includes('progress')
+    || status.includes('running')
+    || status.includes('active')
+    || status.includes('stream')
+    || status === 'busy'
+  ) {
+    return true;
+  }
+  const events = thread.details?.events || [];
+  let lastTurnSignal = null;
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const kind = String(events[index]?.kind || '');
+    if (
+      kind === 'turn_started'
+      || kind === 'turn/completed'
+      || kind === 'turn/failed'
+      || kind === 'turn/cancelled'
+      || kind === 'turn/interrupted'
+    ) {
+      lastTurnSignal = kind;
+      break;
+    }
+  }
+  return lastTurnSignal === 'turn_started';
+}
+
+function getBusyThread() {
+  return state.threads.find((thread) => isThreadBusy(thread)) || null;
+}
+
+function isToolItemType(value) {
+  const text = String(value || '').toLowerCase();
+  return text.includes('tool') || text.includes('command') || text.includes('mcp');
+}
+
+function isToolEvent(event) {
+  if (!event) return false;
+  const kind = String(event.kind || '').toLowerCase();
+  if (kind === 'command' || kind === 'tool_event') return true;
+  if ((kind === 'item_started' || kind === 'item_completed') && isToolItemType(event.itemType)) return true;
+  if (kind.startsWith('item/') && (kind.includes('/tool/') || kind.includes('/commandexecution/') || kind.includes('/mcp'))) return true;
+  return false;
+}
+
+function buildToolActivityCards(thread) {
+  const events = (thread?.details?.events || []).filter((event) => isToolEvent(event));
+  const cards = new Map();
+  for (const event of events) {
+    const key = String(event.itemId || event.callId || event.id || `${event.kind}:${event.method || ''}`);
+    const current = cards.get(key) || {
+      id: key,
+      title: event.itemType ? `工具 ${event.itemType}` : '工具调用',
+      status: '运行中',
+      updatedAt: event.timestamp || new Date().toISOString(),
+      output: '',
+      method: event.method || null,
+    };
+
+    if (event.kind === 'item_started') {
+      current.title = event.itemType ? `工具 ${event.itemType}` : current.title;
+      current.status = '运行中';
+    } else if (event.kind === 'item_completed') {
+      current.title = event.itemType ? `工具 ${event.itemType}` : current.title;
+      current.status = '已完成';
+    } else if (event.kind === 'command') {
+      current.title = '命令执行';
+      current.status = '运行中';
+      current.output = event.output || `${current.output}${event.delta || ''}`;
+    } else if (event.kind === 'tool_event') {
+      const method = String(event.method || '');
+      current.title = method || current.title;
+      current.method = method;
+      current.status = method.split('/').slice(-1)[0] || current.status;
+      if (typeof event.delta === 'string') {
+        current.output = `${current.output}${event.delta}`;
+      }
+    } else {
+      current.title = event.kind || current.title;
+    }
+
+    current.updatedAt = event.timestamp || current.updatedAt;
+    cards.set(key, current);
+  }
+  return [...cards.values()]
+    .sort((left, right) => new Date(left.updatedAt || 0).getTime() - new Date(right.updatedAt || 0).getTime())
+    .slice(-24);
 }
 
 function firstUserMessageText(thread) {
@@ -876,6 +987,18 @@ function applyEvent(event) {
         state.session.viewerRole = state.session.sessionId === event.payload.sessionId ? 'controller' : 'viewer';
       }
     }
+    return;
+  }
+  if (event.type === 'diagnostic') {
+    state.errorLogs = [
+      ...state.errorLogs,
+      {
+        timestamp: event.timestamp || new Date().toISOString(),
+        level: 'DIAG',
+        message: event.payload?.text || '',
+        raw: event.payload?.text || '',
+      },
+    ].slice(-600);
   }
 }
 
@@ -899,6 +1022,8 @@ function timelineSummary(event) {
       return { title: event.label || '步骤完成', body: event.itemType ? `类型：${event.itemType}` : '' };
     case 'command':
       return { title: '命令输出', body: compactText(event.delta || event.output || '') };
+    case 'tool_event':
+      return { title: '工具事件', body: compactText(`${event.method || ''} ${event.delta || ''}`.trim()) };
     case 'file_change':
       return {
         title: '文件变更',
@@ -910,6 +1035,11 @@ function timelineSummary(event) {
       return { title: '会话状态', body: `状态：${statusText(event.status)}` };
     case 'turn/completed':
       return { title: '任务完成', body: 'Codex 已完成当前轮次。' };
+    case 'turn/failed':
+      return { title: '任务失败', body: compactText(event.error?.message || event.message || '轮次执行失败') };
+    case 'turn/cancelled':
+    case 'turn/interrupted':
+      return { title: '任务中断', body: `状态：${event.kind}` };
     case 'thread/tokenUsage/updated':
       return { title: 'Token 用量', body: `输出：${event.tokenUsage?.last?.outputTokens ?? 0}，输入：${event.tokenUsage?.last?.inputTokens ?? 0}` };
     default:
@@ -1041,6 +1171,8 @@ function renderSidebar() {
 
 function renderConversation(thread) {
   const messages = sortedMessages(thread);
+  const toolCards = buildToolActivityCards(thread);
+  const busy = isThreadBusy(thread);
   return h`
     <div class="panel">
       <div class="panelTitle">
@@ -1067,7 +1199,37 @@ function renderConversation(thread) {
                   : `<pre>${escapeHtml(message.text || '')}</pre>`}
               </div>
             `;
-          }).join('') || '<div class="emptyState">暂无消息。</div>'}
+          }).join('')}
+          ${toolCards.length ? `
+            <div class="toolActivityWrap">
+              <div class="toolActivityTitle">工具调用</div>
+              <div class="toolActivityList">
+                ${toolCards.map((card) => `
+                  <div class="toolActivityCard ${card.status === '已完成' ? 'done' : 'running'}">
+                    <div class="toolActivityHead">
+                      <strong>${escapeHtml(card.title || '工具调用')}</strong>
+                      <span class="pill ${card.status === '已完成' ? 'status-ready' : 'status-starting'}">${escapeHtml(card.status || '运行中')}</span>
+                    </div>
+                    <div class="panelSubtle">${escapeHtml(formatTime(card.updatedAt))}</div>
+                    ${card.output ? `<pre>${escapeHtml(compactText(card.output, 240))}</pre>` : ''}
+                  </div>
+                `).join('')}
+              </div>
+            </div>
+          ` : ''}
+          ${busy ? `
+            <div class="messageBubble assistant waiting">
+              <div class="messageMeta">
+                <span>助手</span>
+                <span>处理中</span>
+              </div>
+              <div class="waitingRow">
+                <span class="dotPulse" aria-hidden="true"></span>
+                <span>正在等待最终结果，请勿重复发送。</span>
+              </div>
+            </div>
+          ` : ''}
+          ${(!messages.length && !toolCards.length && !busy) ? '<div class="emptyState">暂无消息。</div>' : ''}
         </div>
         ${state.showTimeline ? `
           <div class="detailSection timelineWrap">
@@ -1268,6 +1430,77 @@ function renderCommands(thread) {
   `;
 }
 
+function renderLogs() {
+  const intercepted = sortedInterceptedLogs();
+  const selected = getSelectedInterceptedLog();
+  const errorLogs = [...state.errorLogs].sort((a, b) => new Date(b.timestamp || 0).getTime() - new Date(a.timestamp || 0).getTime());
+  const typeStats = Object.entries(state.interceptedTypeStats || {}).sort((a, b) => b[1] - a[1]);
+  const statusStats = Object.entries(state.interceptedStatusStats || {}).sort((a, b) => Number(a[0]) - Number(b[0]));
+
+  return h`
+    <div class="panel">
+      <div class="panelTitle">
+        <h2>日志中心</h2>
+        <div class="toolbar">
+          <span class="panelSubtle">拦截 ${intercepted.length} 条 · 错误 ${errorLogs.length} 条</span>
+          <button id="refresh-logs" class="button secondary">刷新日志</button>
+        </div>
+      </div>
+      <div class="requestStat" style="margin: 12px 0;">
+        <div class="statCard"><div class="label">拦截记录文件</div><div class="value">${intercepted.length}</div></div>
+        <div class="statCard"><div class="label">错误日志条数</div><div class="value">${errorLogs.length}</div></div>
+      </div>
+      <div class="detailSection panelSoft">
+        <h4>类型聚合</h4>
+        <div class="chipRow">
+          ${typeStats.map(([name, count]) => `<span class="pill">${escapeHtml(name)} · ${count}</span>`).join('') || '<span class="panelSubtle">暂无类型数据</span>'}
+        </div>
+        <div class="chipRow" style="margin-top: 8px;">
+          ${statusStats.map(([code, count]) => `<span class="pill">${escapeHtml(code)} · ${count}</span>`).join('') || '<span class="panelSubtle">暂无状态码数据</span>'}
+        </div>
+      </div>
+      <div class="contentSplit" style="margin-top: 10px;">
+        <div class="scrollArea requestList">
+          ${intercepted.map((entry) => `
+            <div class="requestCard ${entry.id === state.selectedInterceptedLogId ? 'active' : ''}" data-intercepted-id="${entry.id}">
+              <div class="requestTitleRow">
+                <div class="threadTitle">${escapeHtml(requestTitle(entry))}</div>
+                <span class="pill">${escapeHtml(entry.response?.statusCode || entry.type || 'unknown')}</span>
+              </div>
+              <div class="requestPreview">${escapeHtml(requestPreview(entry))}</div>
+              <div class="panelSubtle">${escapeHtml(formatTime(entry.timestamp))}</div>
+            </div>
+          `).join('') || '<div class="emptyState">暂无拦截日志。</div>'}
+        </div>
+        <div class="detailPane">
+          ${selected ? `
+            <div class="detailSection panelSoft">
+              <h4>拦截记录（结构化）</h4>
+              <pre>${escapeHtml(JSON.stringify(selected, null, 2))}</pre>
+            </div>
+          ` : '<div class="emptyState">请选择一条拦截记录。</div>'}
+          <div class="detailSection panelSoft">
+            <h4>错误日志</h4>
+            <div class="logList">
+              ${errorLogs.map((entry) => `
+                <div class="logLine">
+                  <span class="pill ${statusClass(entry.level)}">${escapeHtml(entry.level || 'LOG')}</span>
+                  <span class="panelSubtle">${escapeHtml(formatTime(entry.timestamp))}</span>
+                  <div class="logMessage">${escapeHtml(entry.message || entry.raw || '')}</div>
+                </div>
+              `).join('') || '<div class="emptyState">暂无错误日志。</div>'}
+            </div>
+          </div>
+          <div class="detailSection panelSoft">
+            <h4>拦截原始 JSONL（尾部）</h4>
+            <pre>${escapeHtml((state.interceptedRawLines || []).slice(-120).join('\n'))}</pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 function renderAskUserComposer(context) {
   const approval = context?.approval || null;
   const signal = context?.signal || null;
@@ -1344,9 +1577,18 @@ function renderAskUserComposer(context) {
 
 function renderMain() {
   const selected = getSelectedThread();
+  const busyThread = getBusyThread();
+  const isBusy = Boolean(busyThread);
   const askUserContext = getActiveAskUserContext();
   const activeAskUserApproval = askUserContext?.source === 'approval' ? askUserContext.approval : null;
   const shouldShowAskUserComposer = Boolean(activeAskUserApproval || askUserContext?.source === 'network');
+  const isReadOnly = state.session?.viewerRole !== 'controller';
+  const composerDisabled = state.sendingPrompt || isBusy || shouldShowAskUserComposer || isReadOnly;
+  const lockReason = isReadOnly
+    ? '当前浏览器是只读模式，请先点击“接管控制”。'
+    : (isBusy
+      ? `线程 ${busyThread?.title || compactId(busyThread?.id || '')} 正在执行，等待结束后再发送。`
+      : '');
   const mobile = isMobileViewport();
   const pendingApprovals = state.approvals.filter((item) => item.status === 'pending').length;
   return h`
@@ -1357,6 +1599,7 @@ function renderMain() {
             <button class="button secondary" data-mobile-open="threads">线程 (${state.threads.length})</button>
             <button class="button secondary" data-tab="approvals">审批 (${pendingApprovals})</button>
             <button class="button secondary" data-tab="requests">请求 (${state.rawRequests.length})</button>
+            <button class="button secondary" data-tab="logs">日志</button>
           </div>
           <div class="mobileCurrentThread">当前：${escapeHtml(selected ? (selected.title || compactId(selected.id, 10, 8)) : '新线程')}</div>
         </div>
@@ -1366,6 +1609,7 @@ function renderMain() {
         ${state.tab === 'requests' ? renderRequests() : ''}
         ${state.tab === 'approvals' ? renderApprovals() : ''}
         ${state.tab === 'commands' ? renderCommands(selected) : ''}
+        ${state.tab === 'logs' ? renderLogs() : ''}
       </div>
       <div class="panel bottomControlPanel">
         <div class="panelTitle" style="margin-top: 8px;">
@@ -1373,10 +1617,11 @@ function renderMain() {
           <span class="panelSubtle">${selected ? `发送到 ${escapeHtml(selected.title || selected.id)}` : '当前未选择线程：发送后将自动创建新线程'}</span>
         </div>
         ${selected ? '<div class="notice">你正在继续当前已选线程。</div>' : ''}
+        ${lockReason ? `<div class="notice">${escapeHtml(lockReason)}</div>` : ''}
         ${shouldShowAskUserComposer ? renderAskUserComposer(askUserContext) : `
           <div class="composerInputRow">
-            <textarea id="prompt-input" placeholder="在这里输入指令（电脑/手机均可）...">${escapeHtml(state.prompt)}</textarea>
-            <button id="send-enter" class="enterSendIconButton" title="回车发送" aria-label="发送消息">
+            <textarea id="prompt-input" placeholder="在这里输入指令（电脑/手机均可）..." ${composerDisabled ? 'disabled' : ''}>${escapeHtml(state.prompt)}</textarea>
+            <button id="send-enter" class="enterSendIconButton" title="回车发送" aria-label="发送消息" ${composerDisabled ? 'disabled' : ''}>
               <svg viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M12 5l6 7h-4v7h-4v-7H6z"></path>
               </svg>
@@ -1385,7 +1630,7 @@ function renderMain() {
           <div class="panelSubtle composerHint">Enter 发送 · Shift+Enter 换行（中文输入法回车选字不会发送）</div>
         `}
         <div class="tabs bottomTabs" style="margin-top: 10px;">
-          ${['conversation', 'requests', 'approvals', 'commands'].map((tab) => `
+          ${['conversation', 'requests', 'approvals', 'commands', 'logs'].map((tab) => `
             <button class="button tabButton ${state.tab === tab ? 'active' : ''}" data-tab="${tab}">${tabLabel(tab)}</button>
           `).join('')}
         </div>
@@ -1493,6 +1738,13 @@ function renderRightbar() {
         </div>
       </div>
       <div class="panel">
+        <div class="panelTitle"><h2>日志中心</h2></div>
+        <div class="panelSubtle">查看拦截日志与错误日志，便于调试和协议解析。</div>
+        <div class="toolbar" style="margin-top: 10px;">
+          <button class="button secondary" data-tab="logs">进入日志中心</button>
+        </div>
+      </div>
+      <div class="panel">
         <div class="panelTitle"><h2>已选请求</h2></div>
         ${selectedRequest ? `
           <div class="panelSubtle">${escapeHtml(requestTitle(selectedRequest))}</div>
@@ -1555,6 +1807,7 @@ function syncScrollPositions() {
   syncScrollableArea('.requestList', 'requests', 'top');
   syncScrollableArea('.approvalList', 'approvals', 'top');
   syncScrollableArea('.commandList', 'commands', 'bottom');
+  syncScrollableArea('.logList', 'logs', 'top');
 }
 
 function render() {
@@ -1624,6 +1877,13 @@ function bindActions() {
     };
   });
 
+  document.querySelectorAll('[data-intercepted-id]').forEach((node) => {
+    node.onclick = () => {
+      state.selectedInterceptedLogId = node.dataset.interceptedId;
+      render();
+    };
+  });
+
   document.querySelectorAll('[data-copy-thread-id]').forEach((node) => {
     node.onclick = async () => {
       const value = node.dataset.copyThreadId || '';
@@ -1669,6 +1929,9 @@ function bindActions() {
       if (selected && needsThreadHistory(selected)) {
         await loadThread(selected.id);
       }
+      if (node.dataset.tab === 'logs') {
+        await loadLogsData();
+      }
       render();
     };
   });
@@ -1711,6 +1974,19 @@ function bindActions() {
   const promptInput = document.querySelector('#prompt-input');
   const submitPrompt = async () => {
     if (state.sendingPrompt) return;
+    if (state.session?.viewerRole !== 'controller') {
+      alert('当前浏览器是只读模式，请先点击“接管控制”。');
+      return;
+    }
+    const busyThread = getBusyThread();
+    if (busyThread) {
+      alert(`线程 ${busyThread.title || compactId(busyThread.id)} 仍在执行中，请等待完成后再发送。`);
+      return;
+    }
+    if (getActiveAskUserContext()) {
+      alert('当前存在待处理 ask-user 交互，请先完成该交互。');
+      return;
+    }
     const prompt = document.querySelector('#prompt-input')?.value.trim();
     if (!prompt) return;
     const selected = getSelectedThread();
@@ -1767,6 +2043,14 @@ function bindActions() {
     sendButton.onclick = submitPrompt;
   }
 
+  const refreshLogs = document.querySelector('#refresh-logs');
+  if (refreshLogs) {
+    refreshLogs.onclick = async () => {
+      await loadLogsData();
+      render();
+    };
+  }
+
   const takeover = document.querySelector('#takeover');
   if (takeover) {
     takeover.onclick = async () => {
@@ -1798,16 +2082,42 @@ function bindActions() {
   }
 }
 
+async function loadLogsData({ limit = 0 } = {}) {
+  const interceptedQuery = Number(limit) <= 0
+    ? '/api/logs/intercepted?all=1'
+    : `/api/logs/intercepted?limit=${encodeURIComponent(limit)}`;
+  const [interceptedResult, errorResult] = await Promise.all([
+    api(interceptedQuery),
+    api(`/api/logs/errors?limit=${encodeURIComponent(Number(limit) <= 0 ? 1200 : Math.min(2000, Math.max(200, Math.floor(limit / 2))))}`),
+  ]);
+
+  state.interceptedLogs = interceptedResult.data || [];
+  state.interceptedTypeStats = interceptedResult.typeStats || {};
+  state.interceptedStatusStats = interceptedResult.statusStats || {};
+  state.interceptedRawLines = interceptedResult.rawLines || [];
+  state.errorLogs = errorResult.data || [];
+
+  const intercepted = sortedInterceptedLogs();
+  if (!state.selectedInterceptedLogId && intercepted.length > 0) {
+    state.selectedInterceptedLogId = intercepted[0].id;
+  }
+  if (state.selectedInterceptedLogId && !intercepted.some((entry) => entry.id === state.selectedInterceptedLogId)) {
+    state.selectedInterceptedLogId = intercepted[0]?.id || null;
+  }
+}
+
 async function refreshData() {
   state.scrollIntent.conversation = true;
   state.scrollIntent.requests = true;
   state.scrollIntent.approvals = true;
   state.scrollIntent.commands = true;
+  state.scrollIntent.logs = true;
   state.session = await api('/api/session');
   mergeThreadsLocal(state.session.threads || []);
   state.approvals = state.session.approvals || [];
   pruneAskUserDrafts();
   state.rawRequests = (await api('/api/raw-requests')).data || [];
+  await loadLogsData();
 
   if (!state.selectedThreadId && state.threads.length > 0) {
     setSelectedThread(state.threads[0].id);
@@ -1853,6 +2163,7 @@ function connectEvents() {
       state.scrollIntent.requests = true;
       state.scrollIntent.approvals = true;
       state.scrollIntent.commands = true;
+      state.scrollIntent.logs = true;
       state.session = payload.data;
       mergeThreadsLocal(payload.data.threads || []);
       state.approvals = payload.data.approvals || [];
@@ -1866,12 +2177,28 @@ function connectEvents() {
       }
       focusConversationForAskUser();
       render();
+      loadLogsData().then(() => render()).catch(() => {});
       hydrateThreadSummariesInBackground().catch(() => {});
       return;
     }
     if (payload.type === 'rawRequest') {
       state.rawRequests = [...state.rawRequests, payload.entry].slice(-150);
+      state.interceptedLogs = [...state.interceptedLogs, payload.entry];
+      state.interceptedRawLines = [...state.interceptedRawLines, JSON.stringify(payload.entry)];
+      const typeKey = String(payload.entry?.type || 'unknown');
+      state.interceptedTypeStats = {
+        ...state.interceptedTypeStats,
+        [typeKey]: (state.interceptedTypeStats[typeKey] || 0) + 1,
+      };
+      if (payload.entry?.response?.statusCode != null) {
+        const code = String(payload.entry.response.statusCode);
+        state.interceptedStatusStats = {
+          ...state.interceptedStatusStats,
+          [code]: (state.interceptedStatusStats[code] || 0) + 1,
+        };
+      }
       if (!state.selectedRequestId) state.selectedRequestId = payload.entry.id;
+      if (!state.selectedInterceptedLogId) state.selectedInterceptedLogId = payload.entry.id;
       focusConversationForAskUser();
       render();
       return;

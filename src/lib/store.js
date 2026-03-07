@@ -1,11 +1,39 @@
 import { nowIso, sortByUpdatedDesc } from './utils.js';
 
+function normalizeStatus(status) {
+  if (status == null) return null;
+  if (typeof status === 'string') return status;
+  if (typeof status === 'object') {
+    if (typeof status.type === 'string') return status.type;
+    try {
+      return JSON.stringify(status);
+    } catch {
+      return String(status);
+    }
+  }
+  return String(status);
+}
+
+function isBusyStatus(status) {
+  const text = String(normalizeStatus(status) || '').toLowerCase();
+  if (!text) return false;
+  return (
+    text.includes('progress')
+    || text.includes('running')
+    || text.includes('active')
+    || text.includes('stream')
+    || text === 'busy'
+  );
+}
+
 function pickThreadSummary(thread = {}) {
   const title = thread.title || thread.name || thread.preview || thread.summary || 'Untitled thread';
+  const status = normalizeStatus(thread.status);
   return {
     id: thread.id,
     title,
-    status: thread.status || 'idle',
+    status,
+    isBusy: isBusyStatus(status),
     cwd: thread.cwd || null,
     updatedAt: thread.updatedAt || thread.updated_at || nowIso(),
     metadata: thread.metadata || null,
@@ -108,6 +136,26 @@ export class ViewerStore {
     return this.threadDetails.get(threadId);
   }
 
+  ensureThreadSummary(threadId) {
+    let summary = this.threadMap.get(threadId);
+    if (!summary) {
+      summary = {
+        id: threadId,
+        title: 'Untitled thread',
+        status: 'idle',
+        isBusy: false,
+        activeTurnId: null,
+        lastTurnStatus: null,
+        cwd: null,
+        updatedAt: nowIso(),
+        metadata: null,
+        raw: {},
+      };
+      this.threadMap.set(threadId, summary);
+    }
+    return summary;
+  }
+
   setStatus(name, value, error = null) {
     this.status[name] = value;
     this.emit({ type: 'system.status', payload: { name, value, error }, timestamp: nowIso() });
@@ -133,10 +181,49 @@ export class ViewerStore {
     const summary = pickThreadSummary(thread);
     const previous = this.threadMap.get(summary.id) || {};
     const merged = { ...previous, ...summary };
+    if (summary.status == null) {
+      merged.status = previous.status || 'idle';
+      merged.isBusy = Boolean(previous.isBusy);
+    } else {
+      merged.isBusy = isBusyStatus(summary.status);
+      if (!merged.status) merged.status = previous.status || 'idle';
+    }
+    if (!merged.status) merged.status = 'idle';
     this.threadMap.set(summary.id, merged);
     this.ensureThreadDetail(summary.id);
     this.emit({ type: 'thread.updated', payload: merged, timestamp: nowIso() });
     return merged;
+  }
+
+  markTurnStarted({ threadId, turnId, timestamp = nowIso() }) {
+    if (!threadId) return;
+    const summary = this.ensureThreadSummary(threadId);
+    summary.status = 'in_progress';
+    summary.isBusy = true;
+    summary.activeTurnId = turnId || summary.activeTurnId || null;
+    summary.lastTurnStatus = 'started';
+    summary.updatedAt = timestamp;
+    this.emit({
+      type: 'thread.updated',
+      payload: { ...summary, details: this.ensureThreadDetail(threadId) },
+      timestamp: nowIso(),
+    });
+  }
+
+  markTurnCompleted({ threadId, turnId, status = 'completed', timestamp = nowIso() }) {
+    if (!threadId) return;
+    const summary = this.ensureThreadSummary(threadId);
+    const normalizedStatus = String(normalizeStatus(status) || 'completed');
+    summary.lastTurnStatus = normalizedStatus;
+    summary.status = normalizedStatus === 'completed' ? 'idle' : normalizedStatus;
+    summary.isBusy = false;
+    if (!turnId || summary.activeTurnId === turnId) summary.activeTurnId = null;
+    summary.updatedAt = timestamp;
+    this.emit({
+      type: 'thread.updated',
+      payload: { ...summary, details: this.ensureThreadDetail(threadId) },
+      timestamp: nowIso(),
+    });
   }
 
   addThreadEvent(threadId, entry) {
@@ -376,9 +463,27 @@ export class ViewerStore {
     const summary = pickThreadSummary(thread);
     const previous = this.threadMap.get(summary.id) || {};
     const merged = { ...previous, ...summary, raw: thread };
-    this.threadMap.set(summary.id, merged);
+    if (summary.status == null) {
+      merged.status = previous.status || 'idle';
+      merged.isBusy = Boolean(previous.isBusy);
+    }
 
     const turns = Array.isArray(thread.turns) ? thread.turns : [];
+    const latestTurn = turns.length ? turns[turns.length - 1] : null;
+    const latestTurnStatus = normalizeStatus(latestTurn?.status);
+    if (latestTurnStatus) {
+      const busy = isBusyStatus(latestTurnStatus);
+      merged.isBusy = busy;
+      merged.lastTurnStatus = latestTurnStatus;
+      merged.activeTurnId = busy ? (latestTurn?.id || null) : null;
+      merged.status = busy ? 'in_progress' : (latestTurnStatus === 'completed' ? 'idle' : latestTurnStatus);
+    } else if (summary.status != null) {
+      merged.isBusy = isBusyStatus(summary.status);
+      if (!merged.status) merged.status = summary.status;
+    }
+    if (!merged.status) merged.status = 'idle';
+    this.threadMap.set(summary.id, merged);
+
     const hasHydratableTurns = turns.some((turn) => Array.isArray(turn?.items) && turn.items.length > 0);
     const detail = hasHydratableTurns ? createThreadDetails(summary.id) : (this.threadDetails.get(summary.id) || createThreadDetails(summary.id));
     const fallbackTimestamp = toIsoTimestamp(thread.updatedAt) || nowIso();
