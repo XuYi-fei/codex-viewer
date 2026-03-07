@@ -1,8 +1,32 @@
 import { createServer } from 'node:http';
 import { readFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { createRequire } from 'node:module';
 import { acceptWebSocket } from './ws.js';
 import { json, readJsonBody, setCookie } from './utils.js';
+
+const require = createRequire(import.meta.url);
+
+function resolveHighlightAssets() {
+  try {
+    const packagePath = require.resolve('@highlightjs/cdn-assets/package.json');
+    const rootDir = dirname(packagePath);
+    const jsPath = join(rootDir, 'highlight.min.js');
+    const cssCandidates = [
+      join(rootDir, 'styles', 'github-dark.min.css'),
+      join(rootDir, 'styles', 'github-dark.css'),
+      join(rootDir, 'styles', 'github.min.css'),
+      join(rootDir, 'styles', 'github.css'),
+    ];
+    const cssPath = cssCandidates.find((entry) => existsSync(entry));
+    if (!existsSync(jsPath) || !cssPath) return null;
+    return { jsPath, cssPath };
+  } catch {
+    return null;
+  }
+}
+
+const highlightAssets = resolveHighlightAssets();
 
 function send(res, response) {
   res.writeHead(response.status, response.headers);
@@ -16,6 +40,26 @@ function contentType(path) {
 }
 
 function serveStatic(publicDir, pathname, res) {
+  if (pathname === '/vendor/highlight.min.js' || pathname === '/vendor/highlight.css') {
+    if (!highlightAssets) {
+      send(res, json({ error: 'Highlight assets unavailable' }, 404));
+      return true;
+    }
+    const filePath = pathname.endsWith('.js') ? highlightAssets.jsPath : highlightAssets.cssPath;
+    if (!filePath || !existsSync(filePath)) {
+      send(res, json({ error: 'Not found' }, 404));
+      return true;
+    }
+    res.writeHead(200, {
+      'content-type': contentType(filePath),
+      'cache-control': 'no-store, no-cache, must-revalidate, max-age=0',
+      pragma: 'no-cache',
+      expires: '0',
+    });
+    res.end(readFileSync(filePath));
+    return true;
+  }
+
   const localPath = pathname === '/' ? '/index.html' : pathname;
   const filePath = join(publicDir, localPath);
   if (!existsSync(filePath)) {
@@ -96,6 +140,7 @@ export function createWebServer({ port, host = '127.0.0.1', publicDir, authManag
       send(res, json({ error: 'Unauthorized' }, 401));
       return null;
     }
+    res.setHeader('set-cookie', authManager.cookieFor(session));
     return session;
   }
 
@@ -216,24 +261,84 @@ export function createWebServer({ port, host = '127.0.0.1', publicDir, authManag
         send(res, json({ error: 'Thread not found' }, 404));
         return;
       }
+      const requestTs = new Date().toISOString();
+      const turnId = thread.activeTurnId || null;
+      let interruptAccepted = false;
+      let interruptError = null;
       try {
         await appServerClient.interruptTurn(threadId);
+        interruptAccepted = true;
       } catch (error) {
+        interruptError = error?.message || String(error);
         store.emit({
           type: 'diagnostic',
-          payload: { stream: 'web-server', text: `interrupt ${threadId}: ${error.message}` },
+          payload: { stream: 'web-server', text: `interrupt ${threadId}: ${interruptError}` },
+          timestamp: requestTs,
+        });
+      }
+
+      let latestThread = store.getThread(threadId) || thread;
+      try {
+        const readResult = await appServerClient.readThread(threadId);
+        const rawThread = extractThread(readResult);
+        if (rawThread?.id) {
+          latestThread = store.hydrateThread(rawThread) || latestThread;
+        }
+      } catch (error) {
+        const readError = error?.message || String(error);
+        store.emit({
+          type: 'diagnostic',
+          payload: { stream: 'web-server', text: `interrupt-readback ${threadId}: ${readError}` },
           timestamp: new Date().toISOString(),
         });
       }
-      store.markTurnCompleted({ threadId, turnId: thread.activeTurnId || null, status: 'interrupted', timestamp: new Date().toISOString() });
+
+      const stillBusy = Boolean(latestThread?.isBusy);
+      if (!interruptAccepted && stillBusy) {
+        send(res, json({
+          error: `Interrupt failed: ${interruptError || 'unknown error'}`,
+          interrupted: false,
+          threadBusy: true,
+          interruptError,
+        }, 502));
+        return;
+      }
+
+      if (stillBusy) {
+        store.addThreadEvent(threadId, {
+          kind: 'turn/interrupt_requested',
+          threadId,
+          turnId,
+          by: 'viewer',
+          timestamp: requestTs,
+          accepted: interruptAccepted,
+        });
+        send(res, json({
+          ok: true,
+          interrupted: false,
+          requested: true,
+          threadBusy: true,
+          message: 'Interrupt request sent, thread still running.',
+          interruptError,
+        }));
+        return;
+      }
+
+      store.markTurnCompleted({ threadId, turnId, status: 'interrupted', timestamp: requestTs });
       store.addThreadEvent(threadId, {
         kind: 'turn/interrupted',
         threadId,
-        turnId: thread.activeTurnId || null,
+        turnId,
         by: 'viewer',
-        timestamp: new Date().toISOString(),
+        timestamp: requestTs,
       });
-      send(res, json({ ok: true }));
+      send(res, json({
+        ok: true,
+        interrupted: true,
+        requested: interruptAccepted,
+        threadBusy: false,
+        interruptError,
+      }));
       return;
     }
 
@@ -368,8 +473,17 @@ export function createWebServer({ port, host = '127.0.0.1', publicDir, authManag
       }
       const approvalId = pathname.split('/')[3];
       const body = await readJsonBody(req);
-      await appServerClient.resolveApproval(approvalId, body.result);
+      const approval = store.getApproval ? store.getApproval(approvalId) : null;
+      await appServerClient.resolveApproval((approval?.rpcId ?? approvalId), body.result);
       store.resolveApproval(approvalId, body.result);
+      store.emit({
+        type: 'diagnostic',
+        payload: {
+          stream: 'approval',
+          text: `resolved approvalId=${approvalId} method=${approval?.method || '-'} threadId=${approval?.threadId || '-'} decision=${JSON.stringify(body.result || {})}`,
+        },
+        timestamp: new Date().toISOString(),
+      });
       send(res, json({ ok: true }));
       return;
     }

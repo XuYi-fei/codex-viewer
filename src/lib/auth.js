@@ -1,7 +1,8 @@
 import { randomToken, setCookie, sha256, cookieParse } from './utils.js';
 
-const SESSION_TTL_SECONDS = 60 * 60 * 12;
-const PAIR_TTL_MS = 1000 * 60 * 10;
+const SESSION_TTL_SECONDS = 60 * 60 * 24;
+const SESSION_TTL_MS = SESSION_TTL_SECONDS * 1000;
+const PAIR_TTL_MS = SESSION_TTL_MS;
 
 export class AuthManager {
   constructor() {
@@ -16,7 +17,6 @@ export class AuthManager {
       tokenHash: sha256(token),
       createdAt: Date.now(),
       expiresAt: Date.now() + PAIR_TTL_MS,
-      used: false,
     };
     this.pairings.set(pairing.tokenHash, pairing);
     return pairing;
@@ -24,10 +24,10 @@ export class AuthManager {
 
   exchangePairing(token) {
     const pairing = this.pairings.get(sha256(token));
-    if (!pairing || pairing.used || pairing.expiresAt < Date.now()) {
+    if (!pairing || pairing.expiresAt < Date.now()) {
       return null;
     }
-    pairing.used = true;
+    pairing.expiresAt = Date.now() + PAIR_TTL_MS;
 
     const sessionId = randomToken(12);
     const bearerToken = randomToken(24);
@@ -36,7 +36,7 @@ export class AuthManager {
       bearerToken,
       bearerHash: sha256(bearerToken),
       createdAt: Date.now(),
-      expiresAt: Date.now() + SESSION_TTL_SECONDS * 1000,
+      expiresAt: Date.now() + SESSION_TTL_MS,
       lastSeenAt: Date.now(),
     };
     this.sessions.set(sessionId, session);
@@ -44,19 +44,34 @@ export class AuthManager {
   }
 
   getPairing() {
-    const active = [...this.pairings.values()].find((entry) => !entry.used && entry.expiresAt > Date.now());
+    const active = [...this.pairings.values()].find((entry) => entry.expiresAt > Date.now());
     return active || this.issuePairing();
   }
 
   authenticate(req) {
+    const now = Date.now();
     const cookies = cookieParse(req.headers.cookie || '');
     const sessionId = cookies.cv_session;
     const authHeader = req.headers.authorization || '';
     const bearer = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
-    const session = sessionId ? this.sessions.get(sessionId) : null;
-    if (!session || session.expiresAt < Date.now()) return null;
-    if (!bearer || sha256(bearer) !== session.bearerHash) return null;
-    session.lastSeenAt = Date.now();
+    if (!bearer) return null;
+
+    const bearerHash = sha256(bearer);
+    let session = sessionId ? this.sessions.get(sessionId) : null;
+    if (session && session.expiresAt < now) {
+      this.sessions.delete(session.id);
+      session = null;
+    }
+    if (session && session.bearerHash !== bearerHash) {
+      session = null;
+    }
+    if (!session) {
+      session = [...this.sessions.values()].find((entry) => entry.bearerHash === bearerHash && entry.expiresAt >= now) || null;
+    }
+    if (!session) return null;
+
+    session.lastSeenAt = now;
+    session.expiresAt = now + SESSION_TTL_MS;
     return session;
   }
 

@@ -112,6 +112,26 @@ const appServerClient = new AppServerClient({
   proxyPort,
 });
 
+function extractApprovalThreadId(params = {}) {
+  if (!params || typeof params !== 'object') return null;
+  return params.threadId
+    || params.thread_id
+    || params.conversationId
+    || params.conversation_id
+    || params.context?.threadId
+    || params.context?.thread_id
+    || null;
+}
+
+function extractApprovalTurnId(params = {}) {
+  if (!params || typeof params !== 'object') return null;
+  return params.turnId
+    || params.turn_id
+    || params.context?.turnId
+    || params.context?.turn_id
+    || null;
+}
+
 appServerClient.on('notification', ({ method, params, timestamp }) => {
   if (method === 'thread/started' && params?.thread) {
     store.upsertThread(params.thread);
@@ -234,16 +254,39 @@ appServerClient.on('response', ({ method, result }) => {
 });
 
 appServerClient.on('serverRequest', ({ requestId, method, params, timestamp }) => {
+  const threadId = extractApprovalThreadId(params || {});
+  const turnId = extractApprovalTurnId(params || {});
+  const normalizedApprovalId = String(requestId);
   const approval = {
-    id: requestId,
+    id: normalizedApprovalId,
+    rpcId: requestId,
     method,
     params,
-    threadId: params.threadId || params.conversationId || null,
-    turnId: params.turnId || null,
+    threadId,
+    turnId,
     createdAt: timestamp,
     status: 'pending',
   };
   store.setApproval(approval);
+
+  if (threadId) {
+    store.addThreadEvent(threadId, {
+      kind: 'approval/requested',
+      method,
+      approvalId: normalizedApprovalId,
+      threadId,
+      turnId,
+      timestamp,
+    });
+  }
+  store.emit({
+    type: 'diagnostic',
+    payload: {
+      stream: 'approval',
+      text: `pending method=${method} approvalId=${normalizedApprovalId} rpcIdType=${typeof requestId} threadId=${threadId || '-'} turnId=${turnId || '-'}`,
+    },
+    timestamp: nowIso(),
+  });
 });
 
 appServerClient.on('diagnostic', ({ stream, text }) => {

@@ -170,7 +170,7 @@ function renderMarkdownBlocks(text = '') {
 
 function renderMarkdown(text = '') {
   const source = String(text || '').replace(/\r\n/g, '\n');
-  const segments = source.split(/```([\w-]*)\n([\s\S]*?)```/g);
+  const segments = source.split(/^\s*```([^\s`]*)\s*\n([\s\S]*?)^\s*```\s*$/gm);
   let html = '';
 
   for (let index = 0; index < segments.length; index += 1) {
@@ -178,16 +178,117 @@ function renderMarkdown(text = '') {
       html += renderMarkdownBlocks(segments[index]);
       continue;
     }
-    const language = escapeHtml(segments[index] || 'code');
+    const languageRaw = String(segments[index] || '').trim();
+    const language = escapeHtml(languageRaw || 'code');
     const code = escapeHtml(segments[index + 1] || '');
-    html += `<pre class="mdCodeBlock"><code data-lang="${language}">${code}</code></pre>`;
+    const codeClass = languageRaw ? ` language-${escapeHtml(languageRaw.toLowerCase().replace(/[^a-z0-9_+#.-]/g, '-'))}` : '';
+    html += `<pre class="mdCodeBlock" data-lang="${language}"><code class="${codeClass.trim()}">${code}</code></pre>`;
     index += 1;
   }
 
   return html || '<p></p>';
 }
 
-function compactStreamingText(value, { keepSingleBlank = false } = {}) {
+function normalizeCodeLanguage(value = '') {
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw) return null;
+  const aliasMap = {
+    js: 'javascript',
+    mjs: 'javascript',
+    cjs: 'javascript',
+    ts: 'typescript',
+    tsx: 'typescript',
+    jsx: 'javascript',
+    py: 'python',
+    rb: 'ruby',
+    sh: 'bash',
+    shell: 'bash',
+    zsh: 'bash',
+    yml: 'yaml',
+    md: 'markdown',
+    csharp: 'csharp',
+    'c#': 'csharp',
+    cs: 'csharp',
+    'c++': 'cpp',
+    hpp: 'cpp',
+    cc: 'cpp',
+    h: 'c',
+    objc: 'objectivec',
+    'objective-c': 'objectivec',
+    text: 'plaintext',
+    plain: 'plaintext',
+  };
+  return aliasMap[raw] || raw;
+}
+
+function highlightCodeBlocks(root = document) {
+  const hljs = window.hljs;
+  if (!hljs || !root?.querySelectorAll) return;
+  root.querySelectorAll('.mdCodeBlock code').forEach((codeNode) => {
+    if (codeNode.dataset.hlApplied === '1') return;
+    const preNode = codeNode.closest('.mdCodeBlock');
+    const rawLang = String(preNode?.dataset?.lang || '').trim();
+    const language = normalizeCodeLanguage(rawLang);
+    const text = codeNode.textContent || '';
+
+    try {
+      if (language && hljs.getLanguage(language)) {
+        codeNode.innerHTML = hljs.highlight(text, { language, ignoreIllegals: true }).value;
+        codeNode.classList.add(`language-${language}`);
+      } else if (text.trim()) {
+        const result = hljs.highlightAuto(text);
+        codeNode.innerHTML = result.value;
+        if (result.language) {
+          preNode.dataset.lang = result.language;
+          codeNode.classList.add(`language-${result.language}`);
+        }
+      }
+    } catch {
+      // keep plain escaped text when highlighting fails
+    }
+
+    if (preNode && !preNode.querySelector('.codeCopyButton')) {
+      const copyButton = document.createElement('button');
+      copyButton.type = 'button';
+      copyButton.className = 'codeCopyButton';
+      copyButton.dataset.copyCode = '1';
+      copyButton.textContent = '复制';
+      preNode.appendChild(copyButton);
+      preNode.classList.add('hasHeader');
+    }
+
+    codeNode.dataset.hlApplied = '1';
+  });
+}
+
+async function copyToClipboard(text = '') {
+  const value = String(text || '');
+  if (!value) return false;
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+    try {
+      await navigator.clipboard.writeText(value);
+      return true;
+    } catch {}
+  }
+  try {
+    const helper = document.createElement('textarea');
+    helper.value = value;
+    helper.setAttribute('readonly', 'readonly');
+    helper.style.position = 'fixed';
+    helper.style.opacity = '0';
+    helper.style.pointerEvents = 'none';
+    document.body.appendChild(helper);
+    helper.select();
+    helper.setSelectionRange(0, helper.value.length);
+    const result = document.execCommand('copy');
+    document.body.removeChild(helper);
+    return Boolean(result);
+  } catch {
+    return false;
+  }
+}
+
+function compactStreamingText(value, { keepSingleBlank = false, trimLeading = true } = {}) {
   const lines = String(value || '')
     .replace(/\r\n/g, '\n')
     .split('\n')
@@ -196,7 +297,7 @@ function compactStreamingText(value, { keepSingleBlank = false } = {}) {
   let blankCount = 0;
 
   for (const rawLine of lines) {
-    const line = String(rawLine || '').replace(/^\s+/g, '');
+    const line = trimLeading ? String(rawLine || '').replace(/^\s+/g, '') : String(rawLine || '');
     if (!line.trim()) {
       blankCount += 1;
       if (!keepSingleBlank || blankCount > 1) continue;
@@ -211,7 +312,7 @@ function compactStreamingText(value, { keepSingleBlank = false } = {}) {
 }
 
 function normalizeThinkingText(value = '') {
-  const compact = compactStreamingText(value, { keepSingleBlank: false });
+  const compact = compactStreamingText(value, { keepSingleBlank: false, trimLeading: true });
   if (!compact) return '';
   const plain = compact
     .replace(/\r\n/g, '\n')
@@ -227,8 +328,44 @@ function normalizeThinkingText(value = '') {
 }
 
 function normalizeAssistantText(value = '') {
-  const compact = compactStreamingText(value, { keepSingleBlank: false });
-  return compact.replace(/\n{2,}/g, '\n').trim();
+  const lines = String(value || '')
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .map((line) => line.replace(/\s+$/g, ''));
+
+  const output = [];
+  let inCodeBlock = false;
+  let blankCount = 0;
+
+  for (const line of lines) {
+    const fence = line.match(/^\s*```([^\s`]*)\s*$/);
+    if (fence) {
+      inCodeBlock = !inCodeBlock;
+      blankCount = 0;
+      output.push(line.trim());
+      continue;
+    }
+
+    if (inCodeBlock) {
+      output.push(line);
+      continue;
+    }
+
+    if (!line.trim()) {
+      blankCount += 1;
+      if (blankCount > 1) continue;
+      output.push('');
+      continue;
+    }
+
+    blankCount = 0;
+    output.push(line);
+  }
+
+  while (output.length > 0 && !output[0].trim()) output.shift();
+  while (output.length > 0 && !output[output.length - 1].trim()) output.pop();
+
+  return output.join('\n');
 }
 
 function renderThinking(message) {
@@ -447,7 +584,21 @@ function sortedMessages(thread) {
 function isThreadBusy(thread) {
   if (!thread) return false;
   if (thread.isBusy === true) return true;
+  if (thread.isBusy === false) return false;
   const status = String(thread.status || '').toLowerCase();
+  if (
+    status === 'idle'
+    || status === 'completed'
+    || status === 'ready'
+    || status === 'done'
+    || status === 'failed'
+    || status === 'cancelled'
+    || status === 'canceled'
+    || status === 'interrupted'
+    || status === 'error'
+  ) {
+    return false;
+  }
   if (
     status.includes('progress')
     || status.includes('running')
@@ -479,6 +630,25 @@ function getSelectedBusyThread() {
   const selected = getSelectedThread();
   if (!selected) return null;
   return isThreadBusy(selected) ? selected : null;
+}
+
+function isThreadInterruptPending(thread) {
+  if (!thread) return false;
+  const events = thread.details?.events || [];
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const kind = String(events[index]?.kind || '');
+    if (kind === 'turn/interrupt_requested') return true;
+    if (
+      kind === 'turn/interrupted'
+      || kind === 'turn/completed'
+      || kind === 'turn/failed'
+      || kind === 'turn/cancelled'
+      || kind === 'turn_started'
+    ) {
+      return false;
+    }
+  }
+  return false;
 }
 
 function isToolItemType(value) {
@@ -630,6 +800,189 @@ function clearAskUserDraft(approvalId) {
   delete state.askUserDraft[approvalId];
 }
 
+function normalizeMethodText(value = '') {
+  return String(value || '')
+    .trim()
+    .replaceAll('.', '/')
+    .replaceAll('-', '/')
+    .toLowerCase();
+}
+
+function canonicalApprovalMethod(value = '') {
+  const normalized = normalizeMethodText(value);
+  if (!normalized) return '';
+  if (
+    normalized === 'item/tool/requestuserinput'
+    || normalized === 'requestuserinput'
+    || normalized === 'request_user_input'
+    || normalized === 'request/user/input'
+  ) {
+    return 'item/tool/requestUserInput';
+  }
+  if (
+    normalized === 'mcpserver/elicitation/request'
+    || normalized === 'elicitation_request'
+    || normalized === 'elicitation/request'
+  ) {
+    return 'mcpServer/elicitation/request';
+  }
+  if (
+    normalized === 'item/commandexecution/requestapproval'
+    || normalized === 'execcommandapproval'
+    || normalized === 'exec_approval_request'
+  ) {
+    return 'item/commandExecution/requestApproval';
+  }
+  if (
+    normalized === 'item/filechange/requestapproval'
+    || normalized === 'applypatchapproval'
+    || normalized === 'apply_patch_approval_request'
+    || normalized === 'file_change_approval_request'
+  ) {
+    return 'item/fileChange/requestApproval';
+  }
+  return String(value || '');
+}
+
+function isAskUserMethod(method = '') {
+  return canonicalApprovalMethod(method) === 'item/tool/requestUserInput';
+}
+
+function isMcpElicitationMethod(method = '') {
+  return canonicalApprovalMethod(method) === 'mcpServer/elicitation/request';
+}
+
+function isCommandApprovalMethod(method = '') {
+  return canonicalApprovalMethod(method) === 'item/commandExecution/requestApproval';
+}
+
+function isFileApprovalMethod(method = '') {
+  return canonicalApprovalMethod(method) === 'item/fileChange/requestApproval';
+}
+
+function firstDefined(...values) {
+  for (const value of values) {
+    if (value !== undefined && value !== null && value !== '') return value;
+  }
+  return null;
+}
+
+function normalizeQuestionOption(option) {
+  if (typeof option === 'string') {
+    return { label: option, description: '' };
+  }
+  if (!option || typeof option !== 'object') return null;
+  const label = String(option.label || option.value || option.title || '').trim();
+  if (!label) return null;
+  return {
+    ...option,
+    label,
+    description: String(option.description || '').trim(),
+  };
+}
+
+function normalizeAskUserQuestion(question, index) {
+  const questionId = firstDefined(question?.id, question?.key, `question_${index + 1}`);
+  return {
+    ...question,
+    id: String(questionId || `question_${index + 1}`),
+    header: String(question?.header || question?.title || questionId || `问题 ${index + 1}`),
+    question: String(question?.question || question?.text || question?.prompt || '').trim(),
+    options: (Array.isArray(question?.options) ? question.options : [])
+      .map((option) => normalizeQuestionOption(option))
+      .filter(Boolean),
+  };
+}
+
+function normalizeAskUserParams(raw = {}) {
+  const params = (raw && typeof raw === 'object') ? { ...raw } : {};
+  const questions = Array.isArray(params.questions) ? params.questions : [];
+  return {
+    ...params,
+    threadId: firstDefined(params.threadId, params.thread_id, params.conversationId, params.conversation_id),
+    turnId: firstDefined(params.turnId, params.turn_id),
+    itemId: firstDefined(params.itemId, params.item_id, params.callId, params.call_id),
+    questions: questions.map((question, index) => normalizeAskUserQuestion(question, index)),
+  };
+}
+
+function normalizeApprovalParams(method, raw = {}) {
+  const params = (raw && typeof raw === 'object') ? { ...raw } : {};
+  if (isAskUserMethod(method)) return normalizeAskUserParams(params);
+
+  return {
+    ...params,
+    threadId: firstDefined(params.threadId, params.thread_id, params.conversationId, params.conversation_id),
+    turnId: firstDefined(params.turnId, params.turn_id),
+    itemId: firstDefined(params.itemId, params.item_id, params.callId, params.call_id),
+  };
+}
+
+function extractThreadIdFromParams(params = {}) {
+  if (!params || typeof params !== 'object') return null;
+  return firstDefined(
+    params.threadId,
+    params.thread_id,
+    params.conversationId,
+    params.conversation_id,
+    params.thread?.id,
+    params.context?.threadId,
+    params.context?.thread_id,
+    params.data?.threadId,
+    params.data?.thread_id,
+  );
+}
+
+function extractTurnIdFromParams(params = {}) {
+  if (!params || typeof params !== 'object') return null;
+  return firstDefined(
+    params.turnId,
+    params.turn_id,
+    params.context?.turnId,
+    params.context?.turn_id,
+    params.data?.turnId,
+    params.data?.turn_id,
+  );
+}
+
+function normalizeApprovalRecord(approval = {}) {
+  if (!approval || typeof approval !== 'object') return null;
+  const methodRaw = String(approval.method || approval.type || approval.kind || '');
+  const method = canonicalApprovalMethod(methodRaw);
+  const params = normalizeApprovalParams(method, approval.params || {});
+  const threadId = firstDefined(
+    approval.threadId,
+    approval.thread_id,
+    approval.conversationId,
+    approval.conversation_id,
+    extractThreadIdFromParams(params),
+  );
+  const turnId = firstDefined(
+    approval.turnId,
+    approval.turn_id,
+    extractTurnIdFromParams(params),
+  );
+  return {
+    ...approval,
+    methodRaw,
+    method,
+    params,
+    threadId: threadId || null,
+    turnId: turnId || null,
+    status: approval.status || 'pending',
+  };
+}
+
+function normalizeApprovals(list = []) {
+  return list
+    .map((item) => normalizeApprovalRecord(item))
+    .filter(Boolean);
+}
+
+function getApprovalById(approvalId) {
+  return state.approvals.find((item) => item.id === approvalId) || null;
+}
+
 function parseBodyMaybe(value) {
   if (value == null) return null;
   if (typeof value === 'string') {
@@ -681,49 +1034,70 @@ function parsePossiblePayloads(value) {
 }
 
 function extractThreadIdFromSignal(signal, fallback = null) {
-  return signal?.params?.threadId
-    || signal?.threadId
-    || signal?.params?.conversationId
-    || signal?.conversationId
-    || fallback;
+  const params = signal?.params || {};
+  return firstDefined(
+    params.threadId,
+    params.thread_id,
+    signal?.threadId,
+    signal?.thread_id,
+    params.conversationId,
+    params.conversation_id,
+    signal?.conversationId,
+    signal?.conversation_id,
+    fallback,
+  );
 }
 
-function findRequestUserInputSignal(value, depth = 0) {
+function extractTurnIdFromSignal(signal, fallback = null) {
+  const params = signal?.params || {};
+  return firstDefined(
+    params.turnId,
+    params.turn_id,
+    signal?.turnId,
+    signal?.turn_id,
+    fallback,
+  );
+}
+
+function findInteractionSignal(value, depth = 0) {
   if (!value || depth > 8) return null;
   if (typeof value === 'string') {
     for (const payload of parsePossiblePayloads(value)) {
-      const found = findRequestUserInputSignal(payload, depth + 1);
+      const found = findInteractionSignal(payload, depth + 1);
       if (found) return found;
     }
     return null;
   }
   if (Array.isArray(value)) {
     for (const item of value) {
-      const found = findRequestUserInputSignal(item, depth + 1);
+      const found = findInteractionSignal(item, depth + 1);
       if (found) return found;
     }
     return null;
   }
   if (typeof value !== 'object') return null;
 
-  const method = String(value.method || value.type || value.kind || '').trim();
-  if (
-    (
-      method === 'item/tool/requestUserInput'
-      || method === 'item.tool.requestUserInput'
-      || method === 'requestUserInput'
-    )
-    && Array.isArray(value.params?.questions)
-  ) {
+  const method = canonicalApprovalMethod(value.method || value.type || value.kind || value.event || value.name || '');
+  const params = normalizeApprovalParams(method, value.params || value);
+  if (isAskUserMethod(method) && Array.isArray(params.questions) && params.questions.length > 0) {
     return {
-      method: 'item/tool/requestUserInput',
-      params: value.params,
-      threadId: extractThreadIdFromSignal(value, null),
+      method,
+      params,
+      threadId: extractThreadIdFromSignal({ ...value, params }, null),
+      turnId: extractTurnIdFromSignal({ ...value, params }, null),
+    };
+  }
+  if (isCommandApprovalMethod(method) || isFileApprovalMethod(method) || isMcpElicitationMethod(method)) {
+    return {
+      method,
+      params,
+      threadId: extractThreadIdFromSignal({ ...value, params }, null),
+      turnId: extractTurnIdFromSignal({ ...value, params }, null),
     };
   }
 
   for (const key of Object.keys(value)) {
-    const found = findRequestUserInputSignal(value[key], depth + 1);
+    const found = findInteractionSignal(value[key], depth + 1);
     if (found) return found;
   }
   return null;
@@ -739,17 +1113,17 @@ function requestMentionsThread(entry, threadId) {
   return haystacks.some((part) => String(part || '').includes(threadId));
 }
 
-function detectAskUserFromRawRequests(threadId) {
+function detectInteractionFromRawRequests(threadId) {
   const now = Date.now();
-  const freshnessWindowMs = 15 * 60 * 1000;
+  const freshnessWindowMs = 5 * 60 * 1000;
   for (const entry of sortedRequests()) {
     const timestampMs = toTimestampMs(entry.timestamp);
     if (timestampMs && (now - timestampMs) > freshnessWindowMs) {
       break;
     }
 
-    const requestSignal = findRequestUserInputSignal(entry.request?.body);
-    const responseSignal = findRequestUserInputSignal(entry.response?.body);
+    const requestSignal = findInteractionSignal(entry.request?.body);
+    const responseSignal = findInteractionSignal(entry.response?.body);
     const signal = requestSignal || responseSignal;
     if (!signal) continue;
 
@@ -762,6 +1136,7 @@ function detectAskUserFromRawRequests(threadId) {
       method: signal.method,
       params: signal.params,
       threadId: signalThreadId || threadId || null,
+      turnId: extractTurnIdFromSignal(signal, null),
       requestId: entry.id,
       timestamp: entry.timestamp,
     };
@@ -769,22 +1144,33 @@ function detectAskUserFromRawRequests(threadId) {
   return null;
 }
 
-function latestResolvedAskUserAt(threadId) {
+function latestResolvedApprovalAt(threadId, method = '') {
   return state.approvals
-    .filter((item) => item.method === 'item/tool/requestUserInput' && item.status !== 'pending')
+    .filter((item) => (!method || item.method === method) && item.status !== 'pending')
     .filter((item) => !threadId || !item.threadId || item.threadId === threadId)
     .reduce((max, item) => Math.max(max, toTimestampMs(item.resolvedAt || item.createdAt)), 0);
 }
 
-function getActiveAskUserContext() {
-  const selectedThreadId = getSelectedThread()?.id || state.selectedThreadId || null;
-  if (!selectedThreadId) return null;
-  const pendingApprovals = state.approvals
-    .filter((item) => item.status === 'pending' && item.method === 'item/tool/requestUserInput')
-    .filter((item) => !selectedThreadId || !item.threadId || item.threadId === selectedThreadId)
-    .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+function pendingApprovalsForSelectedThread() {
+  const selectedThread = getSelectedThread();
+  const selectedThreadId = selectedThread?.id || state.selectedThreadId || null;
+  if (!selectedThreadId) return [];
+  return state.approvals
+    .filter((item) => item.status === 'pending')
+    .filter((item) => {
+      if (!item.threadId) return Boolean(selectedThread && isThreadBusy(selectedThread));
+      return item.threadId === selectedThreadId;
+    })
+    .sort((a, b) => new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime());
+}
 
-  const networkSignal = detectAskUserFromRawRequests(selectedThreadId);
+function getActiveInteractionContext() {
+  const selectedThread = getSelectedThread();
+  const selectedThreadId = selectedThread?.id || state.selectedThreadId || null;
+  if (!selectedThreadId) return null;
+  const pendingApprovals = pendingApprovalsForSelectedThread();
+
+  const networkSignal = detectInteractionFromRawRequests(selectedThreadId);
   if (pendingApprovals.length > 0) {
     return {
       source: 'approval',
@@ -793,10 +1179,13 @@ function getActiveAskUserContext() {
     };
   }
   if (!networkSignal) return null;
+  if (!isAskUserMethod(networkSignal.method)) return null;
+  if (!isThreadBusy(selectedThread)) return null;
 
   const signalTs = toTimestampMs(networkSignal.timestamp);
-  const resolvedTs = latestResolvedAskUserAt(selectedThreadId);
+  const resolvedTs = latestResolvedApprovalAt(selectedThreadId, networkSignal.method);
   if (resolvedTs && signalTs && signalTs <= resolvedTs) return null;
+  if (signalTs && (Date.now() - signalTs) > 90 * 1000) return null;
   return {
     source: 'network',
     signal: networkSignal,
@@ -806,7 +1195,7 @@ function getActiveAskUserContext() {
 function pruneAskUserDrafts() {
   const pendingIds = new Set(
     state.approvals
-      .filter((item) => item.status === 'pending' && item.method === 'item/tool/requestUserInput')
+      .filter((item) => item.status === 'pending' && isAskUserMethod(item.method))
       .map((item) => item.id),
   );
   for (const approvalId of Object.keys(state.askUserDraft || {})) {
@@ -817,7 +1206,8 @@ function pruneAskUserDrafts() {
 }
 
 function focusConversationForAskUser() {
-  if (!getActiveAskUserContext()) return;
+  const context = getActiveInteractionContext();
+  if (!context) return;
   if (state.tab !== 'conversation') setActiveTab('conversation');
   state.scrollIntent.conversation = true;
 }
@@ -1042,8 +1432,10 @@ function applyEvent(event) {
     return;
   }
   if (event.type === 'approval.pending') {
-    state.approvals = [event.payload, ...state.approvals.filter((item) => item.id !== event.payload.id)];
-    if (event.payload.method === 'item/tool/requestUserInput') {
+    const normalized = normalizeApprovalRecord(event.payload);
+    if (!normalized) return;
+    state.approvals = [normalized, ...state.approvals.filter((item) => item.id !== normalized.id)];
+    if (normalized.status === 'pending') {
       setActiveTab('conversation');
       state.scrollIntent.conversation = true;
     }
@@ -1051,8 +1443,18 @@ function applyEvent(event) {
     return;
   }
   if (event.type === 'approval.resolved') {
-    state.approvals = state.approvals.map((item) => item.id === event.payload.id ? event.payload : item);
-    clearAskUserDraft(event.payload.id);
+    const normalized = normalizeApprovalRecord(event.payload);
+    if (!normalized) return;
+    let replaced = false;
+    state.approvals = state.approvals.map((item) => {
+      if (item.id !== normalized.id) return item;
+      replaced = true;
+      return normalized;
+    });
+    if (!replaced) {
+      state.approvals = [normalized, ...state.approvals];
+    }
+    clearAskUserDraft(normalized.id);
     pruneAskUserDrafts();
     return;
   }
@@ -1125,6 +1527,8 @@ function timelineSummary(event) {
     case 'turn/cancelled':
     case 'turn/interrupted':
       return { title: '任务中断', body: `状态：${event.kind}` };
+    case 'turn/interrupt_requested':
+      return { title: '已发起中断', body: '已向 Codex 发送中断请求，等待线程状态回落。' };
     case 'thread/tokenUsage/updated':
       return { title: 'Token 用量', body: `输出：${event.tokenUsage?.last?.outputTokens ?? 0}，输入：${event.tokenUsage?.last?.inputTokens ?? 0}` };
     default:
@@ -1205,6 +1609,7 @@ function renderHeader() {
 
 function renderSidebar() {
   const selected = getSelectedThread();
+  const interruptPending = selected ? isThreadInterruptPending(selected) : false;
   return h`
     <div class="column sidebar">
       <div class="panel">
@@ -1252,7 +1657,7 @@ function renderSidebar() {
             <div class="key">思考数</div><div>${selected.details?.messages?.filter((entry) => entry.role === 'reasoning').length || 0}</div>
           </div>
           <div class="toolbar" style="margin-top: 10px;">
-            ${isThreadBusy(selected) ? `<button class="button secondary" data-thread-interrupt="${escapeHtml(selected.id)}">中断该线程</button>` : ''}
+            ${isThreadBusy(selected) ? `<button class="button secondary" data-thread-interrupt="${escapeHtml(selected.id)}" ${interruptPending ? 'disabled' : ''}>${interruptPending ? '中断中…' : '中断该线程'}</button>` : ''}
             <button class="button danger" data-thread-remove="${escapeHtml(selected.id)}">从列表移除</button>
           </div>
         </div>
@@ -1261,9 +1666,26 @@ function renderSidebar() {
   `;
 }
 
+function getPendingApprovalForThread(threadId) {
+  if (!threadId) return null;
+  const pending = state.approvals
+    .filter((item) => item.status === 'pending')
+    .filter((item) => item.threadId === threadId)
+    .sort((a, b) => new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime());
+  return pending[0] || null;
+}
+
+function pendingApprovalHint(approval) {
+  if (!approval) return '';
+  const label = approvalMethodLabel(approval);
+  const summary = approvalSummaryText(approval);
+  return summary ? `${label}：${summary}` : label;
+}
+
 function renderConversation(thread) {
   const feed = buildConversationFeed(thread);
   const busy = isThreadBusy(thread);
+  const pendingApproval = getPendingApprovalForThread(thread?.id || null);
   const lastTimestamp = feed.length > 0 ? feed[feed.length - 1].timestamp : null;
   const threadMiniTitle = thread ? escapeHtml(thread.title || compactId(thread.id, 12, 8)) : '未选择线程';
   return h`
@@ -1280,7 +1702,18 @@ function renderConversation(thread) {
             if (isFileChangeMessage(entry.item)) return renderFileChangeMessage(entry.item);
             return renderMessageBlock(entry.item);
           }).join('')}
-          ${busy ? `
+          ${pendingApproval ? `
+            <div class="messageEvent waiting">
+              <div class="messageEventMeta">
+                <span>等待审批</span>
+              </div>
+              <div class="waitingRow">
+                <span class="dotPulse" aria-hidden="true"></span>
+                <span>${escapeHtml(pendingApprovalHint(pendingApproval))}</span>
+              </div>
+            </div>
+          ` : ''}
+          ${busy && !pendingApproval ? `
             <div class="messageEvent waiting">
               <div class="messageEventMeta">
                 <span>处理中</span>
@@ -1376,43 +1809,218 @@ function renderRequests() {
 }
 
 function renderApprovalActions(approval) {
-  if (approval.method === 'item/tool/requestUserInput') {
+  const method = canonicalApprovalMethod(approval.method);
+  const params = approval.params || {};
+  const readOnly = state.session?.viewerRole !== 'controller';
+  const disabled = readOnly ? 'disabled' : '';
+
+  if (isAskUserMethod(method)) {
     return `
-      ${(approval.params.questions || []).map((question) => `
-        <label style="display:block; margin-bottom: 10px;">
-          <div class="panelSubtle">${escapeHtml(question.header || question.id)}</div>
-          <div style="margin:6px 0 8px;">${escapeHtml(question.question)}</div>
-          <input data-question-id="${question.id}" data-approval-form="${approval.id}" placeholder="请输入你的回答" />
-        </label>
-      `).join('')}
+      ${(params.questions || []).map((question, index) => {
+        const options = Array.isArray(question.options) ? question.options : [];
+        const questionId = question.id || question.header || `question_${index + 1}`;
+        const selectedValue = getAskUserDraft(approval.id, questionId);
+        return `
+          <div class="askQuestionCard">
+            <div class="panelSubtle">${escapeHtml(question.header || questionId)}</div>
+            <div class="askQuestionText">${escapeHtml(question.question || '')}</div>
+            ${options.length > 0 ? `
+              <div class="askOptionGrid">
+                ${options.map((option) => {
+                  const optionLabel = option?.label || option?.value || option?.title || '';
+                  return `
+                    <button
+                      class="button secondary askOptionButton ${selectedValue === optionLabel ? 'active' : ''}"
+                      data-ask-option="1"
+                      data-approval-id="${escapeHtml(approval.id)}"
+                      data-question-id="${escapeHtml(questionId)}"
+                      data-option-label="${escapeHtml(optionLabel)}"
+                      ${disabled}
+                    >${escapeHtml(optionLabel)}</button>
+                  `;
+                }).join('')}
+              </div>
+            ` : `
+              <input
+                data-question-id="${escapeHtml(questionId)}"
+                data-approval-form="${escapeHtml(approval.id)}"
+                value="${escapeHtml(selectedValue)}"
+                placeholder="请输入你的回答"
+                ${disabled}
+              />
+            `}
+          </div>
+        `;
+      }).join('')}
+      ${readOnly ? '<div class="notice askNotice">当前浏览器为只读，请先接管控制后再提交。</div>' : ''}
       <div class="toolbar">
-        <button class="button primary" data-approval-id="${approval.id}" data-method="${approval.method}" data-decision="submitAnswers">提交</button>
+        <button class="button primary" data-approval-id="${approval.id}" data-method="${method}" data-decision="submitAnswers" ${disabled}>提交</button>
       </div>
     `;
   }
-  if (approval.method === 'mcpServer/elicitation/request') {
+
+  if (isCommandApprovalMethod(method)) {
+    const commandRaw = params.command;
+    const commandText = Array.isArray(commandRaw) ? commandRaw.join(' ') : String(commandRaw || '').trim();
+    const reason = String(params.reason || '').trim();
+    const cwd = String(params.cwd || '').trim();
+    const proposedExecpolicy = Array.isArray(params.proposedExecpolicyAmendment)
+      ? params.proposedExecpolicyAmendment
+      : (Array.isArray(params.proposed_execpolicy_amendment) ? params.proposed_execpolicy_amendment : []);
+    const networkAmendments = Array.isArray(params.proposedNetworkPolicyAmendments)
+      ? params.proposedNetworkPolicyAmendments
+      : (Array.isArray(params.proposed_network_policy_amendments) ? params.proposed_network_policy_amendments : []);
+
+    return `
+      ${reason ? `<div class="panelSubtle" style="margin-bottom: 6px;">原因：${escapeHtml(reason)}</div>` : ''}
+      ${cwd ? `<div class="panelSubtle" style="margin-bottom: 6px;">工作目录：<span class="inlineCode">${escapeHtml(cwd)}</span></div>` : ''}
+      ${commandText ? `<div class="detailSection panelSoft"><h4>命令</h4><pre>${escapeHtml(commandText)}</pre></div>` : ''}
+      ${readOnly ? '<div class="notice askNotice">当前浏览器为只读，请先接管控制后再审批。</div>' : ''}
+      <div class="askOptionGrid" style="margin-top:8px;">
+        <button class="button primary" data-approval-id="${approval.id}" data-method="${method}" data-decision="accept" ${disabled}>允许本次</button>
+        <button class="button secondary" data-approval-id="${approval.id}" data-method="${method}" data-decision="acceptForSession" ${disabled}>本会话允许</button>
+        <button class="button secondary" data-approval-id="${approval.id}" data-method="${method}" data-decision="decline" ${disabled}>拒绝继续</button>
+        <button class="button danger" data-approval-id="${approval.id}" data-method="${method}" data-decision="cancel" ${disabled}>拒绝并中断</button>
+        ${proposedExecpolicy.length > 0
+    ? `<button class="button secondary" data-approval-id="${approval.id}" data-method="${method}" data-decision="acceptWithExecpolicyAmendment" ${disabled}>按建议放行同类命令</button>`
+    : ''}
+        ${networkAmendments.map((amendment, index) => {
+          const action = amendment?.action === 'deny' ? '拒绝' : '允许';
+          const host = amendment?.host || 'unknown-host';
+          return `<button class="button secondary" data-approval-id="${approval.id}" data-method="${method}" data-decision="networkAmendment:${index}" ${disabled}>${action} ${escapeHtml(host)}</button>`;
+        }).join('')}
+      </div>
+    `;
+  }
+
+  if (isFileApprovalMethod(method)) {
+    const reason = String(params.reason || '').trim();
+    const grantRoot = String(params.grantRoot || params.grant_root || '').trim();
+    return `
+      ${reason ? `<div class="panelSubtle" style="margin-bottom: 6px;">原因：${escapeHtml(reason)}</div>` : ''}
+      ${grantRoot ? `<div class="panelSubtle" style="margin-bottom: 6px;">建议授权目录：<span class="inlineCode">${escapeHtml(grantRoot)}</span></div>` : ''}
+      ${readOnly ? '<div class="notice askNotice">当前浏览器为只读，请先接管控制后再审批。</div>' : ''}
+      <div class="askOptionGrid">
+        <button class="button primary" data-approval-id="${approval.id}" data-method="${method}" data-decision="accept" ${disabled}>允许本次</button>
+        <button class="button secondary" data-approval-id="${approval.id}" data-method="${method}" data-decision="acceptForSession" ${disabled}>本会话允许</button>
+        <button class="button secondary" data-approval-id="${approval.id}" data-method="${method}" data-decision="decline" ${disabled}>拒绝继续</button>
+        <button class="button danger" data-approval-id="${approval.id}" data-method="${method}" data-decision="cancel" ${disabled}>拒绝并中断</button>
+      </div>
+    `;
+  }
+
+  if (isMcpElicitationMethod(method)) {
     return `
       <label style="display:block; margin-bottom: 10px;">
         <div class="panelSubtle">可选结构化内容</div>
-        <textarea data-approval-json="${approval.id}" placeholder='{"key":"value"}'></textarea>
+        <textarea data-approval-json="${approval.id}" placeholder='{"key":"value"}' ${disabled}></textarea>
       </label>
+      ${readOnly ? '<div class="notice askNotice">当前浏览器为只读，请先接管控制后再审批。</div>' : ''}
       <div class="toolbar">
-        <button class="button primary" data-approval-id="${approval.id}" data-method="${approval.method}" data-decision="accept">接受</button>
-        <button class="button secondary" data-approval-id="${approval.id}" data-method="${approval.method}" data-decision="decline">拒绝</button>
-        <button class="button danger" data-approval-id="${approval.id}" data-method="${approval.method}" data-decision="cancel">取消</button>
+        <button class="button primary" data-approval-id="${approval.id}" data-method="${method}" data-decision="accept" ${disabled}>接受</button>
+        <button class="button secondary" data-approval-id="${approval.id}" data-method="${method}" data-decision="decline" ${disabled}>拒绝</button>
+        <button class="button danger" data-approval-id="${approval.id}" data-method="${method}" data-decision="cancel" ${disabled}>取消</button>
       </div>
     `;
   }
+
   return `
+    ${readOnly ? '<div class="notice askNotice">当前浏览器为只读，请先接管控制后再审批。</div>' : ''}
     <div class="toolbar">
-      <button class="button primary" data-approval-id="${approval.id}" data-method="${approval.method}" data-decision="accept">通过</button>
-      <button class="button danger" data-approval-id="${approval.id}" data-method="${approval.method}" data-decision="decline">拒绝</button>
+      <button class="button primary" data-approval-id="${approval.id}" data-method="${method}" data-decision="accept" ${disabled}>通过</button>
+      <button class="button danger" data-approval-id="${approval.id}" data-method="${method}" data-decision="decline" ${disabled}>拒绝</button>
     </div>
   `;
 }
 
+function buildCommandApprovalPayload(approval, action, { legacy = false } = {}) {
+  const params = approval?.params || {};
+  const proposedExecpolicy = Array.isArray(params.proposedExecpolicyAmendment)
+    ? params.proposedExecpolicyAmendment
+    : (Array.isArray(params.proposed_execpolicy_amendment) ? params.proposed_execpolicy_amendment : []);
+  const networkAmendments = Array.isArray(params.proposedNetworkPolicyAmendments)
+    ? params.proposedNetworkPolicyAmendments
+    : (Array.isArray(params.proposed_network_policy_amendments) ? params.proposed_network_policy_amendments : []);
+
+  if (action === 'acceptWithExecpolicyAmendment') {
+    if (legacy) {
+      return {
+        decision: {
+          approved_execpolicy_amendment: {
+            proposed_execpolicy_amendment: proposedExecpolicy,
+          },
+        },
+      };
+    }
+    return {
+      decision: {
+        acceptWithExecpolicyAmendment: {
+          execpolicy_amendment: proposedExecpolicy,
+        },
+      },
+    };
+  }
+
+  if (String(action).startsWith('networkAmendment:')) {
+    const index = Number(String(action).split(':')[1]);
+    const amendment = Number.isFinite(index) ? networkAmendments[index] : null;
+    if (amendment && amendment.host && amendment.action) {
+      if (legacy) {
+        return {
+          decision: {
+            network_policy_amendment: {
+              network_policy_amendment: {
+                action: amendment.action,
+                host: amendment.host,
+              },
+            },
+          },
+        };
+      }
+      return {
+        decision: {
+          applyNetworkPolicyAmendment: {
+            network_policy_amendment: {
+              action: amendment.action,
+              host: amendment.host,
+            },
+          },
+        },
+      };
+    }
+  }
+
+  if (legacy) {
+    if (action === 'accept') return { decision: 'approved' };
+    if (action === 'acceptForSession') return { decision: 'approved_for_session' };
+    if (action === 'cancel') return { decision: 'abort' };
+    return { decision: 'denied' };
+  }
+  if (action === 'accept') return { decision: 'accept' };
+  if (action === 'acceptForSession') return { decision: 'acceptForSession' };
+  if (action === 'cancel') return { decision: 'cancel' };
+  return { decision: 'decline' };
+}
+
+function buildFileApprovalPayload(action, { legacy = false } = {}) {
+  if (legacy) {
+    if (action === 'accept') return { decision: 'approved' };
+    if (action === 'acceptForSession') return { decision: 'approved_for_session' };
+    if (action === 'cancel') return { decision: 'abort' };
+    return { decision: 'denied' };
+  }
+  if (action === 'accept') return { decision: 'accept' };
+  if (action === 'acceptForSession') return { decision: 'acceptForSession' };
+  if (action === 'cancel') return { decision: 'cancel' };
+  return { decision: 'decline' };
+}
+
 function buildApprovalPayload(approvalId, method, action) {
-  if (method === 'item/tool/requestUserInput') {
+  const approval = getApprovalById(approvalId);
+  const normalizedMethod = canonicalApprovalMethod(method || approval?.method);
+  const rawMethod = normalizeMethodText(approval?.methodRaw || approval?.method || method);
+
+  if (isAskUserMethod(normalizedMethod)) {
     const draftAnswers = state.askUserDraft[approvalId] || {};
     const inputs = document.querySelectorAll(`[data-approval-form="${approvalId}"]`);
     const answers = {};
@@ -1426,7 +2034,8 @@ function buildApprovalPayload(approvalId, method, action) {
     });
     return { answers };
   }
-  if (method === 'mcpServer/elicitation/request') {
+
+  if (isMcpElicitationMethod(normalizedMethod)) {
     const textarea = document.querySelector(`[data-approval-json="${approvalId}"]`);
     const content = textarea?.value?.trim();
     if (!content) return { action };
@@ -1436,7 +2045,50 @@ function buildApprovalPayload(approvalId, method, action) {
       return { action, content };
     }
   }
+
+  if (isCommandApprovalMethod(normalizedMethod)) {
+    return buildCommandApprovalPayload(approval, action, { legacy: rawMethod === 'execcommandapproval' });
+  }
+
+  if (isFileApprovalMethod(normalizedMethod)) {
+    return buildFileApprovalPayload(action, { legacy: rawMethod === 'applypatchapproval' });
+  }
+
+  if (action === 'cancel') return { decision: 'cancel' };
   return { decision: action === 'accept' ? 'accept' : 'decline' };
+}
+
+function approvalMethodLabel(approval) {
+  const method = canonicalApprovalMethod(approval?.method || '');
+  if (isAskUserMethod(method)) return '工具问询';
+  if (isCommandApprovalMethod(method)) return '命令提权审批';
+  if (isFileApprovalMethod(method)) return '文件写入审批';
+  if (isMcpElicitationMethod(method)) return 'MCP 输入请求';
+  return approval?.method || '审批';
+}
+
+function approvalSummaryText(approval) {
+  const method = canonicalApprovalMethod(approval?.method || '');
+  const params = approval?.params || {};
+  if (isAskUserMethod(method)) {
+    const count = Array.isArray(params.questions) ? params.questions.length : 0;
+    return count > 0 ? `问题数：${count}` : '等待用户输入';
+  }
+  if (isCommandApprovalMethod(method)) {
+    if (Array.isArray(params.command)) return compactText(params.command.join(' '), 100);
+    if (typeof params.command === 'string' && params.command.trim()) return compactText(params.command, 100);
+    if (params.reason) return compactText(params.reason, 100);
+    return '等待命令审批';
+  }
+  if (isFileApprovalMethod(method)) {
+    if (params.reason) return compactText(params.reason, 100);
+    if (params.grantRoot || params.grant_root) return compactText(`授权目录：${params.grantRoot || params.grant_root}`, 100);
+    return '等待文件写入审批';
+  }
+  if (isMcpElicitationMethod(method)) {
+    return compactText(params.message || params.prompt || params.description || '等待 MCP 输入', 100);
+  }
+  return compactText(JSON.stringify(params || {}), 100);
 }
 
 function renderApprovals() {
@@ -1451,11 +2103,11 @@ function renderApprovals() {
         ${approvals.map((approval) => `
           <div class="approvalCard panel">
             <div class="panelTitle">
-              <h3>${escapeHtml(approval.method)}</h3>
+              <h3>${escapeHtml(approvalMethodLabel(approval))}</h3>
               <span class="pill ${approval.status === 'pending' ? 'status-starting' : 'status-ready'}">${escapeHtml(approval.status)}</span>
             </div>
             <div class="panelSubtle">线程：${escapeHtml(approval.threadId || '—')} · ${escapeHtml(formatTime(approval.createdAt))}</div>
-            <div class="detailSection"><pre>${escapeHtml(JSON.stringify(approval.params, null, 2))}</pre></div>
+            <div class="requestPreview">${escapeHtml(approvalSummaryText(approval))}</div>
             ${approval.status === 'pending' ? renderApprovalActions(approval) : '<div class="panelSubtle">该审批已处理完成。</div>'}
           </div>
         `).join('') || '<div class="emptyState">暂无待审批项。</div>'}
@@ -1638,20 +2290,48 @@ function renderAskUserComposer(context) {
   `;
 }
 
+function renderInteractionComposer(context) {
+  if (!context) return '';
+  if (context.source === 'network') {
+    return renderAskUserComposer(context);
+  }
+  const approval = context.approval;
+  if (!approval) return '';
+  const method = canonicalApprovalMethod(approval.method);
+  if (isAskUserMethod(method)) {
+    return renderAskUserComposer(context);
+  }
+  const sourceText = context?.detectedFromNetwork ? '已由网络与控制面共同识别' : '已由控制面识别';
+  return h`
+    <div class="askUserComposer">
+      <div class="askUserHeader">
+        <span class="pill status-starting">需要操作</span>
+        <span class="panelSubtle">${sourceText}</span>
+      </div>
+      <div class="panelSubtle" style="margin-bottom: 8px;">${escapeHtml(approvalMethodLabel(approval))}</div>
+      ${renderApprovalActions(approval)}
+    </div>
+  `;
+}
+
 function renderMain() {
   const selected = getSelectedThread();
   const busyThread = getSelectedBusyThread();
   const isBusy = Boolean(busyThread);
-  const askUserContext = getActiveAskUserContext();
-  const activeAskUserApproval = askUserContext?.source === 'approval' ? askUserContext.approval : null;
-  const shouldShowAskUserComposer = Boolean(activeAskUserApproval || askUserContext?.source === 'network');
+  const interactionContext = getActiveInteractionContext();
+  const activeInteractionApproval = interactionContext?.source === 'approval' ? interactionContext.approval : null;
+  const networkOnlyInteraction = interactionContext?.source === 'network';
+  const shouldShowInteractionComposer = Boolean(activeInteractionApproval);
+  const hasBlockingApproval = Boolean(activeInteractionApproval);
   const isReadOnly = state.session?.viewerRole !== 'controller';
-  const composerDisabled = state.sendingPrompt || isBusy || shouldShowAskUserComposer || isReadOnly;
+  const composerDisabled = state.sendingPrompt || isBusy || hasBlockingApproval || isReadOnly;
   const lockReason = isReadOnly
     ? '当前浏览器是只读模式，请先点击“接管控制”。'
-    : (isBusy
+    : (hasBlockingApproval
+      ? `线程 ${selected?.title || compactId(selected?.id || '')} 存在待处理审批，请先完成交互。`
+      : (isBusy
       ? `线程 ${busyThread?.title || compactId(busyThread?.id || '')} 正在执行，等待结束后再发送。`
-      : '');
+      : ''));
   const mobile = isMobileViewport();
   if (!mobile && state.mobileDrawerOpen) state.mobileDrawerOpen = false;
   return h`
@@ -1680,7 +2360,8 @@ function renderMain() {
       </div>
       <div class="panel bottomControlPanel">
         ${lockReason ? `<div class="notice">${escapeHtml(lockReason)}</div>` : ''}
-        ${shouldShowAskUserComposer ? renderAskUserComposer(askUserContext) : `
+        ${networkOnlyInteraction ? '<div class="notice askNotice">已识别到可能的 ask-user 请求，等待控制面审批 ID 同步后可直接作答。</div>' : ''}
+        ${shouldShowInteractionComposer ? renderInteractionComposer(interactionContext) : `
           <div class="composerInputRow">
             <textarea id="prompt-input" placeholder="在这里输入指令（电脑/手机均可）..." ${composerDisabled ? 'disabled' : ''}>${escapeHtml(state.prompt)}</textarea>
             <button id="send-enter" class="enterSendIconButton" title="回车发送" aria-label="发送消息" ${composerDisabled ? 'disabled' : ''}>
@@ -1732,7 +2413,7 @@ function renderModal() {
       : '<div class="emptyState">请先选择一条请求。</div>';
   } else if (state.modal === 'approval') {
     title = '最近审批';
-    subtitle = latestApproval ? `${latestApproval.method} · ${formatTime(latestApproval.createdAt)}` : '暂无审批';
+    subtitle = latestApproval ? `${approvalMethodLabel(latestApproval)} · ${formatTime(latestApproval.createdAt)}` : '暂无审批';
     body = latestApproval
       ? `<pre>${escapeHtml(JSON.stringify(latestApproval, null, 2))}</pre>`
       : '<div class="emptyState">暂无审批记录。</div>';
@@ -1833,7 +2514,7 @@ function renderRightbar() {
       <div class="panel">
         <div class="panelTitle"><h2>最近审批</h2></div>
         ${latestApproval ? `
-          <div class="panelSubtle">${escapeHtml(latestApproval.method)}</div>
+          <div class="panelSubtle">${escapeHtml(approvalMethodLabel(latestApproval))}</div>
           <div class="requestPreview">${escapeHtml(formatTime(latestApproval.createdAt))} · ${escapeHtml(latestApproval.status || 'pending')}</div>
           <div class="toolbar" style="margin-top: 10px;">
             <button class="button secondary" data-modal-open="approval">查看详情</button>
@@ -1905,6 +2586,7 @@ function render() {
     </div>
   `;
 
+  highlightCodeBlocks(app);
   bindActions();
   syncScrollPositions();
 }
@@ -1933,11 +2615,14 @@ function bindActions() {
       const threadId = node.dataset.threadInterrupt;
       if (!threadId) return;
       try {
-        await api(`/api/threads/${encodeURIComponent(threadId)}/interrupt`, {
+        const result = await api(`/api/threads/${encodeURIComponent(threadId)}/interrupt`, {
           method: 'POST',
           body: '{}',
         });
         await refreshData();
+        if (result?.requested && !result?.interrupted) {
+          alert('已发送中断请求，但线程仍在执行，请稍后观察状态变化。');
+        }
       } catch (error) {
         alert(error.message || '中断失败，请重试。');
       }
@@ -2045,6 +2730,27 @@ function bindActions() {
     };
   });
 
+  document.querySelectorAll('[data-copy-code]').forEach((node) => {
+    node.onclick = async () => {
+      const preNode = node.closest('.mdCodeBlock');
+      const codeNode = preNode?.querySelector('code');
+      const content = codeNode?.textContent || '';
+      if (!content) return;
+      const ok = await copyToClipboard(content);
+      if (!ok) {
+        alert('复制失败，请手动复制。');
+        return;
+      }
+      const original = node.textContent;
+      node.textContent = '已复制';
+      node.classList.add('copied');
+      setTimeout(() => {
+        node.textContent = original || '复制';
+        node.classList.remove('copied');
+      }, 900);
+    };
+  });
+
   document.querySelectorAll('[data-modal-open]').forEach((node) => {
     node.onclick = () => {
       state.modal = node.dataset.modalOpen;
@@ -2073,8 +2779,8 @@ function bindActions() {
       setActiveTab(node.dataset.tab);
       state.scrollIntent[node.dataset.tab] = true;
       const selected = getSelectedThread();
-      if (selected && needsThreadHistory(selected)) {
-        await loadThread(selected.id);
+      if (selected && (needsThreadHistory(selected) || isThreadBusy(selected))) {
+        await loadThread(selected.id, { resume: false });
       }
       if (node.dataset.tab === 'logs') {
         await loadLogsData();
@@ -2091,8 +2797,8 @@ function bindActions() {
       state.scrollIntent[nextTab] = true;
       state.modal = null;
       const selected = getSelectedThread();
-      if (selected && needsThreadHistory(selected)) {
-        await loadThread(selected.id);
+      if (selected && (needsThreadHistory(selected) || isThreadBusy(selected))) {
+        await loadThread(selected.id, { resume: false });
       }
       if (nextTab === 'logs') {
         await loadLogsData();
@@ -2119,7 +2825,7 @@ function bindActions() {
       const action = node.dataset.decision;
       if (!approvalId || !method) return;
       const body = buildApprovalPayload(approvalId, method, action);
-      if (method === 'item/tool/requestUserInput' && Object.keys(body.answers || {}).length === 0) {
+      if (isAskUserMethod(method) && Object.keys(body.answers || {}).length === 0) {
         alert('请至少选择或输入一条回答。');
         return;
       }
@@ -2149,8 +2855,10 @@ function bindActions() {
       alert(`线程 ${busyThread.title || compactId(busyThread.id)} 仍在执行中，请等待完成后再发送。`);
       return;
     }
-    if (getActiveAskUserContext()) {
-      alert('当前存在待处理 ask-user 交互，请先完成该交互。');
+    const interactionContext = getActiveInteractionContext();
+    const blockingApproval = interactionContext?.source === 'approval' ? interactionContext.approval : null;
+    if (blockingApproval) {
+      alert(`当前线程存在待处理审批（${approvalMethodLabel(blockingApproval)}），请先完成该交互。`);
       return;
     }
     const prompt = document.querySelector('#prompt-input')?.value.trim();
@@ -2272,7 +2980,7 @@ async function refreshData() {
   state.scrollIntent.logs = true;
   state.session = await api('/api/session');
   mergeThreadsLocal(state.session.threads || []);
-  state.approvals = state.session.approvals || [];
+  state.approvals = normalizeApprovals(state.session.approvals || []);
   pruneAskUserDrafts();
   state.rawRequests = (await api('/api/raw-requests')).data || [];
   await loadLogsData();
@@ -2285,13 +2993,23 @@ async function refreshData() {
   }
   if (state.selectedThreadId) {
     const selected = getSelectedThread();
-    if (selected && needsThreadHistory(selected)) {
+    if (selected && (needsThreadHistory(selected) || isThreadBusy(selected))) {
       try {
-        await loadThread(state.selectedThreadId);
+        await loadThread(state.selectedThreadId, { resume: false });
       } catch (error) {
         console.warn('Failed to hydrate thread history', error);
       }
     }
+  }
+
+  const busyThreadIds = state.threads
+    .filter((thread) => isThreadBusy(thread))
+    .map((thread) => thread.id)
+    .filter(Boolean);
+  if (busyThreadIds.length > 0) {
+    await Promise.allSettled(
+      busyThreadIds.map((threadId) => loadThread(threadId, { resume: false })),
+    );
   }
 
   const requests = sortedRequests();
@@ -2324,14 +3042,14 @@ function connectEvents() {
       state.scrollIntent.logs = true;
       state.session = payload.data;
       mergeThreadsLocal(payload.data.threads || []);
-      state.approvals = payload.data.approvals || [];
+      state.approvals = normalizeApprovals(payload.data.approvals || []);
       pruneAskUserDrafts();
       if (!state.selectedThreadId && state.threads.length > 0) {
         setSelectedThread(state.threads[0].id);
       }
       const selected = getSelectedThread();
-      if (selected && needsThreadHistory(selected)) {
-        loadThread(selected.id).then(() => render()).catch(() => {});
+      if (selected && (needsThreadHistory(selected) || isThreadBusy(selected))) {
+        loadThread(selected.id, { resume: false }).then(() => render()).catch(() => {});
       }
       focusConversationForAskUser();
       render();

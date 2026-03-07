@@ -83,6 +83,8 @@ npm run stop
 - 若 Codex 通过 `CONNECT` 建立 TLS 隧道，v1 只能记录元数据，无法解密查看 HTTPS 负载。
 - 公网访问建议通过反向代理暴露 `http://127.0.0.1:<port>`，例如 Caddy、Nginx 或 Tailscale Serve。
 - 当前 UI 桌面端为三栏布局；手机端为简化单栏，使用左上角抽屉（线程/导航/时间线）+ 弹窗切换，主区域聚焦会话与输入。
+- 认证令牌策略：支持多设备复用同一配对 token；默认 1 天有效期，访问会触发滑动续期（成功请求后自动刷新过期时间）。
+- Markdown 代码块使用 `@highlightjs/cdn-assets`（highlight.js）高亮（支持常见语言与自动识别），并保留原始缩进。
 - 调试日志默认写入 `<workspace>/.codex-viewer/logs/codex-viewer.log`，可用 `--log-file` 自定义路径。
 
 ## 当前完成度（v0.1.x）
@@ -91,6 +93,7 @@ npm run stop
 - ✅ 观测平面：已实现本地代理抓取并展示原始请求；在 `CONNECT` 模式下可展示元数据。
 - ✅ Web 远控：支持浏览器登录、会话恢复、实时事件推送（WebSocket）。
 - ✅ 手机访问：支持移动浏览器抽屉式布局、线程切换、发送 prompt、处理 ask-user/审批。
+- ✅ 提权交互：支持命令提权、文件写入、ask-user、MCP elicitation 的选项化审批卡片与提交。
 - ✅ 刷新恢复：会话刷新后可继续看到工具调用轨迹（含历史合并与回放兜底）。
 - ✅ 公网测试：支持 `--web-host 0.0.0.0` 直接对外监听，并可通过 `--public-url` 生成可分享链接。
 - ⚠️ 安全与部署：当前默认 HTTP 明文，生产环境仍建议 Nginx + HTTPS + 访问控制。

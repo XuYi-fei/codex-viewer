@@ -751,13 +751,55 @@ textarea {
   font-size: 12px;
 }
 .mdCodeBlock {
+  position: relative;
   overflow: auto;
+  white-space: pre;
+  tab-size: 2;
   padding: 12px 14px;
   border-radius: 12px;
   border: 1px solid rgba(255,255,255,0.06);
   background: rgba(6, 10, 20, 0.78);
 }
+.mdCodeBlock.hasHeader {
+  padding-top: 28px;
+}
+.mdCodeBlock[data-lang]:not([data-lang="code"])::before {
+  content: attr(data-lang);
+  position: absolute;
+  top: 8px;
+  left: 10px;
+  color: #8fa7d2;
+  font-size: 10px;
+  line-height: 1;
+  letter-spacing: 0.03em;
+  text-transform: lowercase;
+}
+.codeCopyButton {
+  position: absolute;
+  top: 5px;
+  right: 8px;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.08);
+  color: #e8eefc;
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+}
+.codeCopyButton:hover {
+  background: rgba(255, 255, 255, 0.13);
+}
+.codeCopyButton.copied {
+  border-color: rgba(47, 208, 127, 0.55);
+  color: #b8f4cf;
+}
 .mdCodeBlock code {
+  display: block;
+  white-space: inherit;
+  font-size: 12px;
+  line-height: 1.45;
   background: transparent;
   border: none;
   padding: 0;

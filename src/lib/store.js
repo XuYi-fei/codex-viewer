@@ -748,8 +748,10 @@ export class ViewerStore {
   setApproval(approval) {
     if (!approval?.id) return;
     if (approval.threadId && this.isThreadHidden(approval.threadId)) return;
-    this.approvals.set(approval.id, approval);
-    this.emit({ type: 'approval.pending', payload: approval, timestamp: nowIso() });
+    const key = String(approval.id);
+    const normalized = { ...approval, id: key };
+    this.approvals.set(key, normalized);
+    this.emit({ type: 'approval.pending', payload: normalized, timestamp: nowIso() });
   }
 
   removeThread(threadId, { reason = 'manual' } = {}) {
@@ -765,12 +767,31 @@ export class ViewerStore {
   }
 
   resolveApproval(id, resolution) {
-    const item = this.approvals.get(id);
+    const key = String(id);
+    const item = this.approvals.get(key);
     if (!item) return;
     item.resolvedAt = nowIso();
     item.resolution = resolution;
     item.status = 'resolved';
+    if (item.threadId && !this.isThreadHidden(item.threadId)) {
+      this.addThreadEvent(item.threadId, {
+        kind: 'approval/resolved',
+        threadId: item.threadId,
+        turnId: item.turnId || null,
+        approvalId: item.id,
+        method: item.method,
+        timestamp: item.resolvedAt,
+      });
+    }
     this.emit({ type: 'approval.resolved', payload: item, timestamp: nowIso() });
+  }
+
+  getApproval(id) {
+    if (!id) return null;
+    const item = this.approvals.get(String(id));
+    if (!item) return null;
+    if (item.threadId && this.isThreadHidden(item.threadId)) return null;
+    return item;
   }
 
   getApprovals() {
