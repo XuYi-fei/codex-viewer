@@ -13,7 +13,7 @@ function printHelp() {
   console.log(`codex-viewer ${VERSION}
 
 Usage:
-  codex-viewer start [--foreground] [--workspace DIR] [--web-host HOST] [--web-port N] [--public-url URL]
+  codex-viewer start [--foreground] [--workspace DIR] [--web-host HOST] [--web-port N] [--public-url URL] [--log-file FILE]
   codex-viewer stop [--workspace DIR]
   codex-viewer status [--workspace DIR]
   codex-viewer open [--workspace DIR]
@@ -85,6 +85,7 @@ function startCommand(args) {
     console.log(`Local URL: ${existing.localUrl}`);
     if (existing.publicUrl) console.log(`Public URL: ${existing.publicUrl}`);
     console.log(`Pair URL: ${existing.pairUrl}`);
+    if (existing.appLogPath) console.log(`App log: ${existing.appLogPath}`);
     return;
   }
   if (existing?.pid && !isProcessAlive(existing.pid)) {
@@ -102,6 +103,7 @@ function startCommand(args) {
     daemonArgs.push('--web-host', args['web-host'] === true ? '0.0.0.0' : String(args['web-host']));
   }
   if (args['public-url']) daemonArgs.push('--public-url', String(args['public-url']));
+  if (args['log-file']) daemonArgs.push('--log-file', String(args['log-file']));
 
   if (args.foreground) {
     const child = spawn(process.execPath, daemonArgs, {
@@ -135,6 +137,7 @@ function startCommand(args) {
       console.log(`Pair URL: ${state.pairUrl}`);
       console.log(`Runtime state: ${statePath}`);
       console.log(`Daemon log: ${logPath}`);
+      if (state.appLogPath) console.log(`App log: ${state.appLogPath}`);
       return;
     }
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
@@ -193,6 +196,7 @@ function openCommand(args) {
   console.log(`Local URL: ${state.localUrl}`);
   if (state.publicUrl) console.log(`Public URL: ${state.publicUrl}`);
   console.log(`Pair URL: ${state.pairUrl}`);
+  if (state.appLogPath) console.log(`App log: ${state.appLogPath}`);
 }
 
 const args = parseArgs(process.argv.slice(2));

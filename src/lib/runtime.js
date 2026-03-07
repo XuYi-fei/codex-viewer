@@ -14,6 +14,7 @@ export function createRuntimePaths(workspacePath) {
     dataDir,
     statePath: join(root, 'runtime-state.json'),
     rawLogPath: join(logsDir, 'raw-requests.jsonl'),
+    appLogPath: join(logsDir, 'codex-viewer.log'),
     daemonLogPath: join(root, 'daemon.log'),
   };
 }

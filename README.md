@@ -16,6 +16,8 @@
 npm --prefix /Users/xuyifei/repos/codex-viewer run here
 ```
 
+默认从固定端口 `17777` 启动；若端口被占用，会自动尝试 `17778`、`17779`… 直到可用。
+
 公网直连测试（监听 `0.0.0.0`）：
 
 ```bash
@@ -97,6 +99,7 @@ npm run stop -- --workspace /path/to/your/project
 - 若 Codex 通过 `CONNECT` 建立 TLS 隧道，v1 只能记录元数据，无法解密查看 HTTPS 负载。
 - 公网访问建议通过反向代理暴露 `http://127.0.0.1:<port>`，例如 Caddy、Nginx 或 Tailscale Serve。
 - 当前 UI 桌面端为三栏布局，手机端为简化单栏：主会话 + 底部操作，线程切换通过弹窗完成。
+- 调试日志默认写入 `<workspace>/.codex-viewer/logs/codex-viewer.log`，可用 `--log-file` 自定义路径。
 
 ## 当前完成度（v0.1.x）
 

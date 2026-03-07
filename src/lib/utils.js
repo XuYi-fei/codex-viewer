@@ -38,6 +38,32 @@ export async function getFreePort(host = '127.0.0.1') {
   });
 }
 
+export async function isPortAvailable(port, host = '127.0.0.1') {
+  return new Promise((resolve) => {
+    const server = createServer();
+    server.unref();
+    server.on('error', () => resolve(false));
+    server.listen(port, host, () => {
+      server.close(() => resolve(true));
+    });
+  });
+}
+
+export async function findAvailablePort(startPort, { host = '127.0.0.1', maxTries = 500 } = {}) {
+  const base = Number(startPort);
+  if (!Number.isInteger(base) || base <= 0 || base > 65535) {
+    throw new Error(`Invalid start port: ${startPort}`);
+  }
+
+  let port = base;
+  for (let attempt = 0; attempt < maxTries && port <= 65535; attempt += 1, port += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    const available = await isPortAvailable(port, host);
+    if (available) return port;
+  }
+  throw new Error(`No available port found from ${base} on ${host}`);
+}
+
 export function json(value, status = 200, headers = {}) {
   return {
     status,

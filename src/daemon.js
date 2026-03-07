@@ -1,7 +1,7 @@
 import process from 'node:process';
-import { rmSync } from 'node:fs';
+import { appendFileSync, rmSync } from 'node:fs';
 import { networkInterfaces } from 'node:os';
-import { parseArgs, getFreePort, nowIso } from './lib/utils.js';
+import { parseArgs, getFreePort, findAvailablePort, nowIso } from './lib/utils.js';
 import { createRuntimePaths, writeRuntimeState } from './lib/runtime.js';
 import { LogStore } from './lib/log-store.js';
 import { ViewerStore } from './lib/store.js';
@@ -13,13 +13,40 @@ import { createWebServer } from './lib/web-server.js';
 const args = parseArgs(process.argv.slice(2));
 const workspacePath = args.workspace || process.cwd();
 const runtime = createRuntimePaths(workspacePath);
+const appLogPath = args['log-file']
+  ? String(args['log-file'])
+  : (process.env.CODEX_VIEWER_LOG_FILE || runtime.appLogPath);
 const webHost = args['web-host'] === true
   ? '0.0.0.0'
   : (String(args['web-host'] || process.env.CODEX_VIEWER_WEB_HOST || '127.0.0.1').trim() || '127.0.0.1');
-const webPort = Number(args['web-port'] || await getFreePort(webHost === '0.0.0.0' ? '127.0.0.1' : webHost));
+const requestedWebPort = Number(args['web-port'] || process.env.CODEX_VIEWER_WEB_PORT || 17777);
+const webPort = await findAvailablePort(requestedWebPort, { host: webHost, maxTries: 1000 });
 const proxyPort = await getFreePort();
 const appServerPort = await getFreePort();
 const publicUrl = args['public-url'] || process.env.CODEX_VIEWER_PUBLIC_URL || null;
+
+function writeAppLog(level, message, details = null) {
+  const timestamp = nowIso();
+  const suffix = details ? ` ${typeof details === 'string' ? details : JSON.stringify(details)}` : '';
+  try {
+    appendFileSync(appLogPath, `${timestamp} [${level}] ${message}${suffix}\n`);
+  } catch {}
+}
+
+function logInfo(message, details = null) {
+  console.log(`[codex-viewer] ${message}`);
+  writeAppLog('INFO', message, details);
+}
+
+function logWarn(message, details = null) {
+  console.warn(`[codex-viewer] ${message}`);
+  writeAppLog('WARN', message, details);
+}
+
+function logError(message, details = null) {
+  console.error(`[codex-viewer] ${message}`);
+  writeAppLog('ERROR', message, details);
+}
 
 function discoverExternalHost(bindHost) {
   if (!bindHost || bindHost === '127.0.0.1' || bindHost === 'localhost') return null;
@@ -52,6 +79,25 @@ const store = new ViewerStore({
   appServerPort,
 });
 const logStore = new LogStore({ filePath: runtime.rawLogPath });
+
+store.subscribe((event) => {
+  if (!event) return;
+  if (event.type === 'diagnostic') {
+    writeAppLog('DIAG', `diagnostic:${event.payload?.stream || 'unknown'}`, event.payload?.text || '');
+    return;
+  }
+  if (event.type === 'system.status') {
+    writeAppLog('STATUS', `${event.payload?.name}=${event.payload?.value}`, event.payload?.error || null);
+    return;
+  }
+  if (event.type === 'request.failed' || event.type === 'request.connectFailed') {
+    writeAppLog('WARN', `${event.type}`, {
+      url: event.payload?.request?.url || null,
+      method: event.payload?.request?.method || null,
+      error: event.payload?.error || null,
+    });
+  }
+});
 
 const proxyServer = createProxyServer({
   port: proxyPort,
@@ -152,6 +198,7 @@ appServerClient.on('diagnostic', ({ stream, text }) => {
 
 appServerClient.on('exit', ({ code, signal }) => {
   store.setStatus('appServer', 'exited', `code=${code ?? 'null'} signal=${signal ?? 'null'}`);
+  logWarn('app-server exited', { code, signal });
 });
 
 const webServer = createWebServer({
@@ -166,6 +213,19 @@ const webServer = createWebServer({
 });
 
 async function main() {
+  writeAppLog('INFO', 'daemon starting', {
+    workspacePath,
+    webHost,
+    requestedWebPort,
+    resolvedWebPort: webPort,
+    proxyPort,
+    appServerPort,
+    appLogPath,
+  });
+  if (webPort !== requestedWebPort) {
+    logWarn(`requested web port ${requestedWebPort} is busy, switched to ${webPort}`);
+  }
+
   store.setStatus('proxy', 'starting');
   await proxyServer.listen();
   store.setStatus('proxy', 'ready');
@@ -196,21 +256,24 @@ async function main() {
     pairUrl,
     pairingToken: pairing.token,
     webPort,
+    requestedWebPort,
     webHost,
     proxyPort,
     appServerPort,
+    appLogPath,
   });
 
-  console.log(`[codex-viewer] Local URL: ${localUrl}`);
+  logInfo(`Local URL: ${localUrl}`);
   if (webHost !== '127.0.0.1') {
-    console.log(`[codex-viewer] Web Host: ${webHost} (accessible from remote network if firewall allows)`);
+    logInfo(`Web Host: ${webHost} (accessible from remote network if firewall allows)`);
   }
-  if (effectivePublicUrl) console.log(`[codex-viewer] Public URL: ${effectivePublicUrl}`);
-  console.log(`[codex-viewer] Pair URL: ${pairUrl}`);
+  if (effectivePublicUrl) logInfo(`Public URL: ${effectivePublicUrl}`);
+  logInfo(`Pair URL: ${pairUrl}`);
+  logInfo(`Debug log: ${appLogPath}`);
 }
 
 async function shutdown(signal) {
-  console.log(`[codex-viewer] shutting down on ${signal}`);
+  logInfo(`shutting down on ${signal}`);
   try { await webServer.close(); } catch {}
   try { await proxyServer.close(); } catch {}
   try { appServerClient.stop(); } catch {}
@@ -220,8 +283,14 @@ async function shutdown(signal) {
 
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('uncaughtException', (error) => {
+  logError('uncaughtException', error?.stack || error?.message || String(error));
+});
+process.on('unhandledRejection', (reason) => {
+  logError('unhandledRejection', typeof reason === 'string' ? reason : (reason?.stack || JSON.stringify(reason)));
+});
 
 main().catch((error) => {
-  console.error('[codex-viewer] fatal:', error);
+  logError('fatal', error?.stack || error?.message || String(error));
   process.exit(1);
 });
