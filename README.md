@@ -75,7 +75,13 @@ node scripts/workspace-cli.js start /path/to/your/project
 npm run open
 npm run status
 npm run stop
+npm run smoke
+npm run smoke:approval
 ```
+
+- `npm run smoke`：基础链路冒烟（配对、发起线程、等待完成）。
+- `npm run smoke:approval`：审批链路冒烟（尝试触发并自动处理审批）。
+- 冒烟结果会写入 `<workspace>/.codex-viewer/logs/smoke-*.json`。
 
 ## Notes
 

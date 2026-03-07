@@ -14,6 +14,8 @@
     "open": "node scripts/workspace-cli.js open",
     "status": "node scripts/workspace-cli.js status",
     "stop": "node scripts/workspace-cli.js stop",
+    "smoke": "node scripts/smoke.js",
+    "smoke:approval": "node scripts/smoke.js --mode approval",
     "here": "npm run start",
     "here:bg": "npm run start:bg",
     "open:here": "npm run open",
