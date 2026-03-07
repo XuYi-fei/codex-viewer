@@ -114,6 +114,7 @@ export class ViewerStore {
     };
     this.threadMap = new Map();
     this.threadDetails = new Map();
+    this.hiddenThreadIds = new Set();
     this.approvals = new Map();
     this.sessions = new Map();
     this.writerSessionId = null;
@@ -156,6 +157,10 @@ export class ViewerStore {
     return summary;
   }
 
+  isThreadHidden(threadId) {
+    return this.hiddenThreadIds.has(threadId);
+  }
+
   setStatus(name, value, error = null) {
     this.status[name] = value;
     this.emit({ type: 'system.status', payload: { name, value, error }, timestamp: nowIso() });
@@ -178,6 +183,7 @@ export class ViewerStore {
   }
 
   upsertThread(thread) {
+    if (!thread?.id || this.isThreadHidden(thread.id)) return null;
     const summary = pickThreadSummary(thread);
     const previous = this.threadMap.get(summary.id) || {};
     const merged = { ...previous, ...summary };
@@ -197,6 +203,7 @@ export class ViewerStore {
 
   markTurnStarted({ threadId, turnId, timestamp = nowIso() }) {
     if (!threadId) return;
+    if (this.isThreadHidden(threadId)) return;
     const summary = this.ensureThreadSummary(threadId);
     summary.status = 'in_progress';
     summary.isBusy = true;
@@ -212,6 +219,7 @@ export class ViewerStore {
 
   markTurnCompleted({ threadId, turnId, status = 'completed', timestamp = nowIso() }) {
     if (!threadId) return;
+    if (this.isThreadHidden(threadId)) return;
     const summary = this.ensureThreadSummary(threadId);
     const normalizedStatus = String(normalizeStatus(status) || 'completed');
     summary.lastTurnStatus = normalizedStatus;
@@ -227,6 +235,7 @@ export class ViewerStore {
   }
 
   addThreadEvent(threadId, entry) {
+    if (!threadId || this.isThreadHidden(threadId)) return;
     const detail = this.ensureThreadDetail(threadId);
     detail.events.push(entry);
     if (detail.events.length > 500) detail.events = detail.events.slice(-500);
@@ -459,6 +468,7 @@ export class ViewerStore {
 
   hydrateThread(thread) {
     if (!thread?.id) return null;
+    if (this.isThreadHidden(thread.id)) return null;
 
     const summary = pickThreadSummary(thread);
     const previous = this.threadMap.get(summary.id) || {};
@@ -660,8 +670,22 @@ export class ViewerStore {
   }
 
   setApproval(approval) {
+    if (!approval?.id) return;
+    if (approval.threadId && this.isThreadHidden(approval.threadId)) return;
     this.approvals.set(approval.id, approval);
     this.emit({ type: 'approval.pending', payload: approval, timestamp: nowIso() });
+  }
+
+  removeThread(threadId, { reason = 'manual' } = {}) {
+    if (!threadId) return false;
+    this.hiddenThreadIds.add(threadId);
+    for (const [approvalId, approval] of this.approvals.entries()) {
+      if (approval?.threadId === threadId) {
+        this.approvals.delete(approvalId);
+      }
+    }
+    this.emit({ type: 'thread.removed', payload: { threadId, reason }, timestamp: nowIso() });
+    return true;
   }
 
   resolveApproval(id, resolution) {
@@ -674,11 +698,15 @@ export class ViewerStore {
   }
 
   getApprovals() {
-    return [...this.approvals.values()].sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
+    return [...this.approvals.values()]
+      .filter((entry) => !(entry?.threadId && this.isThreadHidden(entry.threadId)))
+      .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
   }
 
   getThreads() {
-    return sortByUpdatedDesc([...this.threadMap.values()].map((thread) => ({
+    return sortByUpdatedDesc([...this.threadMap.values()]
+      .filter((thread) => !this.isThreadHidden(thread.id))
+      .map((thread) => ({
       ...thread,
       details: this.threadDetails.get(thread.id) || createThreadDetails(thread.id),
     })), (thread) => thread.updatedAt);
@@ -686,7 +714,7 @@ export class ViewerStore {
 
   getThread(threadId) {
     const thread = this.threadMap.get(threadId);
-    if (!thread) return null;
+    if (!thread || this.isThreadHidden(threadId)) return null;
     return {
       ...thread,
       details: this.threadDetails.get(threadId) || createThreadDetails(threadId),

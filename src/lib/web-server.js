@@ -185,11 +185,83 @@ export function createWebServer({ port, host = '127.0.0.1', publicDir, authManag
       }
       const body = await readJsonBody(req);
       const threadResult = await appServerClient.startThread({ cwd: body.cwd || runtimeState.workspacePath, model: body.model || null });
-      const thread = store.upsertThread(extractThread(threadResult));
+      const rawThread = extractThread(threadResult);
+      const thread = store.upsertThread(rawThread) || rawThread;
+      if (!thread?.id) {
+        send(res, json({ error: 'Failed to create thread' }, 500));
+        return;
+      }
       if (body.prompt) {
         await appServerClient.sendTurn({ threadId: thread.id, prompt: body.prompt, cwd: body.cwd || runtimeState.workspacePath, model: body.model || null });
       }
       send(res, json({ thread: store.getThread(thread.id) || thread }));
+      return;
+    }
+
+    if (pathname.startsWith('/api/threads/') && pathname.endsWith('/interrupt') && req.method === 'POST') {
+      const session = requireAuth(req, res);
+      if (!session) return;
+      if (store.getSessionRole(session.id) !== 'controller') {
+        send(res, json({ error: 'Viewer is read-only. Take control first.' }, 409));
+        return;
+      }
+      const threadId = pathname.split('/')[3];
+      const thread = store.getThread(threadId);
+      if (!thread) {
+        send(res, json({ error: 'Thread not found' }, 404));
+        return;
+      }
+      try {
+        await appServerClient.interruptTurn(threadId);
+      } catch (error) {
+        store.emit({
+          type: 'diagnostic',
+          payload: { stream: 'web-server', text: `interrupt ${threadId}: ${error.message}` },
+          timestamp: new Date().toISOString(),
+        });
+      }
+      store.markTurnCompleted({ threadId, turnId: thread.activeTurnId || null, status: 'interrupted', timestamp: new Date().toISOString() });
+      store.addThreadEvent(threadId, {
+        kind: 'turn/interrupted',
+        threadId,
+        turnId: thread.activeTurnId || null,
+        by: 'viewer',
+        timestamp: new Date().toISOString(),
+      });
+      send(res, json({ ok: true }));
+      return;
+    }
+
+    if (pathname.startsWith('/api/threads/') && pathname.endsWith('/remove') && req.method === 'POST') {
+      const session = requireAuth(req, res);
+      if (!session) return;
+      if (store.getSessionRole(session.id) !== 'controller') {
+        send(res, json({ error: 'Viewer is read-only. Take control first.' }, 409));
+        return;
+      }
+      const threadId = pathname.split('/')[3];
+      const thread = store.getThread(threadId);
+      if (!thread) {
+        send(res, json({ error: 'Thread not found' }, 404));
+        return;
+      }
+      let interrupted = false;
+      let interruptError = null;
+      if (thread.isBusy) {
+        try {
+          await appServerClient.interruptTurn(threadId);
+          interrupted = true;
+        } catch (error) {
+          interruptError = error?.message || String(error);
+          store.emit({
+            type: 'diagnostic',
+            payload: { stream: 'web-server', text: `interrupt-before-remove ${threadId}: ${interruptError}` },
+            timestamp: new Date().toISOString(),
+          });
+        }
+      }
+      store.removeThread(threadId, { reason: 'manual-remove' });
+      send(res, json({ ok: true, interrupted, interruptError }));
       return;
     }
 

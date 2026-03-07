@@ -441,8 +441,10 @@ function isThreadBusy(thread) {
   return lastTurnSignal === 'turn_started';
 }
 
-function getBusyThread() {
-  return state.threads.find((thread) => isThreadBusy(thread)) || null;
+function getSelectedBusyThread() {
+  const selected = getSelectedThread();
+  if (!selected) return null;
+  return isThreadBusy(selected) ? selected : null;
 }
 
 function isToolItemType(value) {
@@ -704,6 +706,7 @@ function latestResolvedAskUserAt(threadId) {
 
 function getActiveAskUserContext() {
   const selectedThreadId = getSelectedThread()?.id || state.selectedThreadId || null;
+  if (!selectedThreadId) return null;
   const pendingApprovals = state.approvals
     .filter((item) => item.status === 'pending' && item.method === 'item/tool/requestUserInput')
     .filter((item) => !selectedThreadId || !item.threadId || item.threadId === selectedThreadId)
@@ -956,6 +959,16 @@ function applyEvent(event) {
     pushThreadEventLocal(event.payload);
     return;
   }
+  if (event.type === 'thread.removed') {
+    const threadId = event.payload?.threadId;
+    if (!threadId) return;
+    state.threads = state.threads.filter((item) => item.id !== threadId);
+    state.approvals = state.approvals.filter((item) => item.threadId !== threadId);
+    if (state.selectedThreadId === threadId) {
+      setSelectedThread(state.threads[0]?.id || null);
+    }
+    return;
+  }
   if (event.type === 'approval.pending') {
     state.approvals = [event.payload, ...state.approvals.filter((item) => item.id !== event.payload.id)];
     if (event.payload.method === 'item/tool/requestUserInput') {
@@ -1160,8 +1173,13 @@ function renderSidebar() {
               >${escapeHtml(compactId(selected.id))}</button>
             </div>
             <div class="key">更新时间</div><div>${escapeHtml(formatTime(selected.updatedAt))}</div>
+            <div class="key">执行状态</div><div>${isThreadBusy(selected) ? '<span class="pill status-starting">执行中</span>' : '<span class="pill status-ready">空闲</span>'}</div>
             <div class="key">消息数</div><div>${selected.details?.messages?.filter((entry) => entry.role !== 'reasoning').length || 0}</div>
             <div class="key">思考数</div><div>${selected.details?.messages?.filter((entry) => entry.role === 'reasoning').length || 0}</div>
+          </div>
+          <div class="toolbar" style="margin-top: 10px;">
+            ${isThreadBusy(selected) ? `<button class="button secondary" data-thread-interrupt="${escapeHtml(selected.id)}">中断该线程</button>` : ''}
+            <button class="button danger" data-thread-remove="${escapeHtml(selected.id)}">从列表移除</button>
           </div>
         </div>
       ` : ''}
@@ -1577,7 +1595,7 @@ function renderAskUserComposer(context) {
 
 function renderMain() {
   const selected = getSelectedThread();
-  const busyThread = getBusyThread();
+  const busyThread = getSelectedBusyThread();
   const isBusy = Boolean(busyThread);
   const askUserContext = getActiveAskUserContext();
   const activeAskUserApproval = askUserContext?.source === 'approval' ? askUserContext.approval : null;
@@ -1852,6 +1870,43 @@ function bindActions() {
     };
   });
 
+  document.querySelectorAll('[data-thread-interrupt]').forEach((node) => {
+    node.onclick = async () => {
+      const threadId = node.dataset.threadInterrupt;
+      if (!threadId) return;
+      try {
+        await api(`/api/threads/${encodeURIComponent(threadId)}/interrupt`, {
+          method: 'POST',
+          body: '{}',
+        });
+        await refreshData();
+      } catch (error) {
+        alert(error.message || '中断失败，请重试。');
+      }
+    };
+  });
+
+  document.querySelectorAll('[data-thread-remove]').forEach((node) => {
+    node.onclick = async () => {
+      const threadId = node.dataset.threadRemove;
+      if (!threadId) return;
+      const sure = window.confirm('确认从列表移除该线程？如果线程仍在执行，会先尝试中断。');
+      if (!sure) return;
+      try {
+        await api(`/api/threads/${encodeURIComponent(threadId)}/remove`, {
+          method: 'POST',
+          body: '{}',
+        });
+        if (state.selectedThreadId === threadId) {
+          setSelectedThread(null);
+        }
+        await refreshData();
+      } catch (error) {
+        alert(error.message || '移除失败，请重试。');
+      }
+    };
+  });
+
   document.querySelectorAll('[data-mobile-open]').forEach((node) => {
     node.onclick = () => {
       state.modal = node.dataset.mobileOpen || null;
@@ -1978,7 +2033,8 @@ function bindActions() {
       alert('当前浏览器是只读模式，请先点击“接管控制”。');
       return;
     }
-    const busyThread = getBusyThread();
+    const selected = getSelectedThread();
+    const busyThread = selected && isThreadBusy(selected) ? selected : null;
     if (busyThread) {
       alert(`线程 ${busyThread.title || compactId(busyThread.id)} 仍在执行中，请等待完成后再发送。`);
       return;
@@ -1989,7 +2045,6 @@ function bindActions() {
     }
     const prompt = document.querySelector('#prompt-input')?.value.trim();
     if (!prompt) return;
-    const selected = getSelectedThread();
     state.sendingPrompt = true;
     try {
       if (!selected) {
