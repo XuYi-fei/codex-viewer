@@ -18,7 +18,7 @@ const appLogPath = args['log-file']
   : (process.env.CODEX_VIEWER_LOG_FILE || runtime.appLogPath);
 const webHost = args['web-host'] === true
   ? '0.0.0.0'
-  : (String(args['web-host'] || process.env.CODEX_VIEWER_WEB_HOST || '127.0.0.1').trim() || '127.0.0.1');
+  : (String(args['web-host'] || process.env.CODEX_VIEWER_WEB_HOST || '0.0.0.0').trim() || '0.0.0.0');
 const requestedWebPort = Number(args['web-port'] || process.env.CODEX_VIEWER_WEB_PORT || 17777);
 const webPort = await findAvailablePort(requestedWebPort, { host: webHost, maxTries: 1000 });
 const proxyPort = await getFreePort();

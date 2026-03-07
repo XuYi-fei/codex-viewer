@@ -8,19 +8,19 @@
     "codex-viewer": "cli.js"
   },
   "scripts": {
-    "start": "node cli.js start --foreground",
-    "start:bg": "node cli.js start",
-    "dev": "node cli.js start --foreground",
-    "here": "node scripts/workspace-cli.js start --foreground",
-    "here:bg": "node scripts/workspace-cli.js start",
-    "here:public": "node scripts/workspace-cli.js start --foreground --web-host 0.0.0.0",
-    "here:public:bg": "node scripts/workspace-cli.js start --web-host 0.0.0.0",
-    "open": "node cli.js open",
-    "open:here": "node scripts/workspace-cli.js open",
-    "status": "node cli.js status",
-    "status:here": "node scripts/workspace-cli.js status",
-    "stop": "node cli.js stop",
-    "stop:here": "node scripts/workspace-cli.js stop"
+    "start": "node scripts/workspace-cli.js start --foreground",
+    "start:bg": "node scripts/workspace-cli.js start",
+    "dev": "npm run start",
+    "open": "node scripts/workspace-cli.js open",
+    "status": "node scripts/workspace-cli.js status",
+    "stop": "node scripts/workspace-cli.js stop",
+    "here": "npm run start",
+    "here:bg": "npm run start:bg",
+    "open:here": "npm run open",
+    "status:here": "npm run status",
+    "stop:here": "npm run stop",
+    "here:public": "npm run start",
+    "here:public:bg": "npm run start:bg"
   },
   "engines": {
     "node": ">=20"

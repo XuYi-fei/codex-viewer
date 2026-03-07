@@ -8,89 +8,73 @@
 
 ## Quick Start
 
-### 方式 1：在目标项目目录里一键启动
+### 一键启动（推荐）
 
-在你要控制的项目目录中执行：
-
-```bash
-npm --prefix /Users/xuyifei/repos/codex-viewer run here
-```
-
-默认从固定端口 `17777` 启动；若端口被占用，会自动尝试 `17778`、`17779`… 直到可用。
-
-公网直连测试（监听 `0.0.0.0`）：
+先进入 `codex-viewer` 目录，然后在你要控制的项目目录中执行：
 
 ```bash
-npm --prefix /Users/xuyifei/repos/codex-viewer run here:public
+npm run start
 ```
 
-后台启动：
+- 默认公网监听：`0.0.0.0`
+- 默认起始端口：`17777`（被占用会自动 +1）
+- 自动使用当前目录作为 `workspace`
+- 启动后终端会打印 `Pair URL`，手机直接访问即可
+
+后台运行：
 
 ```bash
-npm --prefix /Users/xuyifei/repos/codex-viewer run here:bg
+npm run start:bg
 ```
 
-公网后台：
+### 只需要时再加的参数（可选）
+
+如果你希望生成固定公网链接（比如服务器有固定 IP/域名）：
 
 ```bash
-npm --prefix /Users/xuyifei/repos/codex-viewer run here:public:bg
+npm run start -- --public-url http://<服务器IP或域名>:<端口>
 ```
 
-这会自动把当前目录当作 `--workspace`。
+如果你希望从其他起始端口尝试：
 
-### 方式 2：直接执行脚本
+```bash
+npm run start -- --web-port 18888
+```
+
+如果你希望指定 Codex 工作目录（两种方式都支持）：
+
+```bash
+npm run start -- --workspace /path/to/your/project
+```
+
+```bash
+npm run start -- /path/to/your/project
+```
+
+```bash
+node scripts/workspace-cli.js start /path/to/your/project
+```
+
+### 脚本方式（等价）
 
 前台：
 
 ```bash
-/Users/xuyifei/repos/codex-viewer/start.sh
+./start.sh
 ```
 
 后台：
 
 ```bash
-/Users/xuyifei/repos/codex-viewer/start-bg.sh
-```
-
-如果想显式指定工作目录：
-
-```bash
-/Users/xuyifei/repos/codex-viewer/start.sh /path/to/your/project
-```
-
-### 方式 3：在项目目录内手动指定
-
-```bash
-cd /Users/xuyifei/repos/codex-viewer
-node cli.js start --foreground --workspace /path/to/your/project
-```
-
-如果你在服务器上直接开放端口测试，可加：
-
-```bash
-node cli.js start --foreground --workspace /path/to/your/project --web-host 0.0.0.0
-```
-
-若要生成准确的手机访问链接，建议额外指定：
-
-```bash
-node cli.js start --foreground --workspace /path/to/your/project --web-host 0.0.0.0 --public-url http://<服务器IP或域名>:<端口>
+./start-bg.sh
 ```
 
 ## Useful Commands
 
 ```bash
-npm --prefix /Users/xuyifei/repos/codex-viewer run open:here
-npm --prefix /Users/xuyifei/repos/codex-viewer run status:here
-npm --prefix /Users/xuyifei/repos/codex-viewer run stop:here
-```
-
-或在 `codex-viewer` 目录内：
-
-```bash
-npm run open -- --workspace /path/to/your/project
-npm run status -- --workspace /path/to/your/project
-npm run stop -- --workspace /path/to/your/project
+npm run open
+npm run status
+npm run stop
 ```
 
 ## Notes
