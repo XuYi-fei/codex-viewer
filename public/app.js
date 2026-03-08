@@ -2587,8 +2587,7 @@ function renderMain() {
           <aside class="mobileDrawerPanel">
             <div class="mobileDrawerActions">
               <button class="button secondary" data-mobile-drawer-open="threads">线程 (${state.threads.length})</button>
-              <button class="button secondary" data-mobile-drawer-open="nav">导航</button>
-              <button class="button secondary" data-mobile-drawer-toggle-timeline="1">${state.showTimeline ? '隐藏时间线' : '显示时间线'}</button>
+              <button class="button secondary" data-mobile-drawer-open="logs">日志 (${state.errorLogs.length})</button>
             </div>
           </aside>
         ` : ''}
@@ -2631,6 +2630,7 @@ function renderModal() {
   const selected = getSelectedThread();
   const selectedRequest = getSelectedRequest();
   const latestApproval = [...state.approvals].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
+  const errorLogs = [...state.errorLogs].sort((a, b) => new Date(b.timestamp || 0).getTime() - new Date(a.timestamp || 0).getTime());
 
   let title = '';
   let subtitle = '';
@@ -2680,23 +2680,32 @@ function renderModal() {
         `).join('') || '<div class="emptyState">暂无线程。</div>'}
       </div>
     `;
-  } else if (state.modal === 'nav') {
-    title = '导航';
-    subtitle = `当前：${tabLabel(state.tab)}`;
+  } else if (state.modal === 'logs') {
+    title = '日志';
+    subtitle = `错误 ${errorLogs.length} 条 · 拦截 ${state.interceptedLogs.length} 条`;
     body = `
       <div class="mobileNavList">
-        <button class="button secondary mobileNavButton ${state.tab === 'conversation' ? 'active' : ''}" data-modal-tab="conversation">对话</button>
-        <button class="button secondary mobileNavButton ${state.tab === 'approvals' ? 'active' : ''}" data-modal-tab="approvals">审批 (${state.approvals.filter((item) => item.status === 'pending').length})</button>
-        <button class="button secondary mobileNavButton ${state.tab === 'requests' ? 'active' : ''}" data-modal-tab="requests">请求 (${state.rawRequests.length})</button>
-        <button class="button secondary mobileNavButton ${state.tab === 'commands' ? 'active' : ''}" data-modal-tab="commands">命令</button>
-        <button class="button secondary mobileNavButton ${state.tab === 'logs' ? 'active' : ''}" data-modal-tab="logs">日志</button>
+        <button class="button secondary mobileNavButton ${state.tab === 'logs' ? 'active' : ''}" data-modal-tab="logs">打开日志中心</button>
+        <button class="button secondary mobileNavButton ${state.tab === 'requests' ? 'active' : ''}" data-modal-tab="requests">打开请求视图</button>
+      </div>
+      <div class="detailSection panelSoft" style="margin-top: 10px;">
+        <h4>最近错误</h4>
+        <div class="logList scrollArea">
+          ${errorLogs.slice(0, 8).map((entry) => `
+            <div class="logLine">
+              <span class="pill ${statusClass(entry.level)}">${escapeHtml(entry.level || 'LOG')}</span>
+              <span class="panelSubtle">${escapeHtml(formatTime(entry.timestamp))}</span>
+              <div class="logMessage">${escapeHtml(entry.message || entry.raw || '')}</div>
+            </div>
+          `).join('') || '<div class="emptyState">暂无错误日志。</div>'}
+        </div>
       </div>
     `;
   }
 
   return h`
     <div class="modalOverlay" data-modal-dismiss="1">
-      <div class="modalCard ${state.modal === 'nav' ? 'drawerCard' : ''}" role="dialog" aria-modal="true" aria-label="${escapeHtml(title)}">
+      <div class="modalCard ${state.modal === 'logs' ? 'drawerCard' : ''}" role="dialog" aria-modal="true" aria-label="${escapeHtml(title)}">
         <div class="panelTitle">
           <div>
             <h2>${escapeHtml(title)}</h2>
@@ -2854,6 +2863,7 @@ function bindActions() {
       const threadId = node.dataset.threadId;
       const shouldCloseModal = node.dataset.closeModal === '1';
       setSelectedThread(threadId);
+      setActiveTab('conversation');
       state.scrollIntent.conversation = true;
       state.scrollIntent.commands = true;
       if (shouldCloseModal) state.modal = null;
