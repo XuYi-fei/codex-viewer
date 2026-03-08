@@ -13,6 +13,7 @@ export function createRuntimePaths(workspacePath) {
     logsDir,
     dataDir,
     statePath: join(root, 'runtime-state.json'),
+    threadDetailsPath: join(dataDir, 'thread-details.json'),
     rawLogPath: join(logsDir, 'raw-requests.jsonl'),
     appLogPath: join(logsDir, 'codex-viewer.log'),
     daemonLogPath: join(root, 'daemon.log'),

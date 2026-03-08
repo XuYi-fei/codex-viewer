@@ -1,5 +1,5 @@
 import process from 'node:process';
-import { appendFileSync, rmSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { networkInterfaces } from 'node:os';
 import { parseArgs, getFreePort, findAvailablePort, nowIso } from './lib/utils.js';
 import { createRuntimePaths, writeRuntimeState } from './lib/runtime.js';
@@ -79,6 +79,45 @@ const store = new ViewerStore({
   appServerPort,
 });
 const logStore = new LogStore({ filePath: runtime.rawLogPath });
+const threadDetailsPath = runtime.threadDetailsPath;
+
+function loadThreadDetailsSnapshot() {
+  if (!threadDetailsPath || !existsSync(threadDetailsPath)) return 0;
+  try {
+    const raw = readFileSync(threadDetailsPath, 'utf8');
+    const parsed = JSON.parse(raw);
+    return store.importThreadDetails(parsed);
+  } catch (error) {
+    writeAppLog('WARN', 'failed to read thread detail snapshot', error?.message || String(error));
+    return 0;
+  }
+}
+
+function saveThreadDetailsSnapshot(reason = 'periodic') {
+  try {
+    const snapshot = store.exportThreadDetails();
+    writeFileSync(threadDetailsPath, `${JSON.stringify(snapshot)}\n`);
+    writeAppLog('DIAG', 'thread detail snapshot saved', { reason, threads: snapshot.threadDetails?.length || 0 });
+    return true;
+  } catch (error) {
+    writeAppLog('WARN', 'failed to save thread detail snapshot', error?.message || String(error));
+    return false;
+  }
+}
+
+let persistDetailsTimer = null;
+function scheduleThreadDetailsPersist(reason = 'event') {
+  if (persistDetailsTimer) return;
+  persistDetailsTimer = setTimeout(() => {
+    persistDetailsTimer = null;
+    saveThreadDetailsSnapshot(reason);
+  }, 900);
+}
+
+const restoredThreadDetailCount = loadThreadDetailsSnapshot();
+if (restoredThreadDetailCount > 0) {
+  writeAppLog('INFO', 'restored thread details from snapshot', { threads: restoredThreadDetailCount, path: threadDetailsPath });
+}
 
 store.subscribe((event) => {
   if (!event) return;
@@ -97,6 +136,13 @@ store.subscribe((event) => {
       error: event.payload?.error || null,
     });
   }
+  if (
+    event.type === 'thread.updated'
+    || event.type === 'thread.event'
+    || event.type === 'thread.removed'
+  ) {
+    scheduleThreadDetailsPersist(event.type);
+  }
 });
 
 const proxyServer = createProxyServer({
@@ -111,6 +157,29 @@ const appServerClient = new AppServerClient({
   workspacePath,
   proxyPort,
 });
+
+function extractThreadFromResult(result) {
+  return result?.thread || result?.data?.thread || result?.data || result || null;
+}
+
+const threadBackfillInFlight = new Set();
+async function backfillThreadDetails(threadId, reason = 'unknown') {
+  if (!threadId || threadBackfillInFlight.has(threadId)) return false;
+  threadBackfillInFlight.add(threadId);
+  try {
+    const result = await appServerClient.readThread(threadId);
+    const thread = extractThreadFromResult(result);
+    if (!thread?.id) return false;
+    store.hydrateThread(thread);
+    writeAppLog('DIAG', `thread-backfill:${reason}`, { threadId, hasTurns: Array.isArray(thread.turns) ? thread.turns.length : 0 });
+    return true;
+  } catch (error) {
+    writeAppLog('WARN', `thread-backfill-failed:${reason}`, { threadId, error: error?.message || String(error) });
+    return false;
+  } finally {
+    threadBackfillInFlight.delete(threadId);
+  }
+}
 
 function extractApprovalThreadId(params = {}) {
   if (!params || typeof params !== 'object') return null;
@@ -207,6 +276,7 @@ appServerClient.on('notification', ({ method, params, timestamp }) => {
     if (params?.threadId) {
       store.markTurnCompleted({ threadId: params.threadId, turnId: params.turnId, status: 'completed', timestamp });
       store.addThreadEvent(params.threadId, { kind: 'turn/completed', timestamp, ...params });
+      void backfillThreadDetails(params.threadId, 'turn-completed');
     }
     return;
   }
@@ -215,6 +285,7 @@ appServerClient.on('notification', ({ method, params, timestamp }) => {
       const finalStatus = method.split('/')[1] || 'failed';
       store.markTurnCompleted({ threadId: params.threadId, turnId: params.turnId, status: finalStatus, timestamp });
       store.addThreadEvent(params.threadId, { kind: method, timestamp, ...params });
+      void backfillThreadDetails(params.threadId, method);
     }
     return;
   }
@@ -303,7 +374,7 @@ appServerClient.on('response', ({ method, result }) => {
     for (const thread of result.data) store.upsertThread(thread);
   }
   if (method === 'thread/read' || method === 'thread/resume') {
-    const thread = result?.thread || result?.data?.thread || result?.data || result;
+    const thread = extractThreadFromResult(result);
     if (thread?.id) store.hydrateThread(thread);
   }
 });
@@ -397,6 +468,11 @@ async function main() {
     const list = await appServerClient.listThreads();
     if (Array.isArray(list?.data)) {
       for (const thread of list.data) store.upsertThread(thread);
+      const recentThreadIds = list.data
+        .map((thread) => thread?.id)
+        .filter(Boolean)
+        .slice(0, 30);
+      await Promise.allSettled(recentThreadIds.map((threadId) => backfillThreadDetails(threadId, 'startup')));
     }
   } catch (error) {
     store.emit({ type: 'diagnostic', payload: { stream: 'bootstrap', text: error.message }, timestamp: nowIso() });
@@ -420,6 +496,7 @@ async function main() {
     proxyPort,
     appServerPort,
     appLogPath,
+    threadDetailsPath,
   });
 
   logInfo(`Local URL: ${localUrl}`);
@@ -433,6 +510,13 @@ async function main() {
 
 async function shutdown(signal) {
   logInfo(`shutting down on ${signal}`);
+  try {
+    if (persistDetailsTimer) {
+      clearTimeout(persistDetailsTimer);
+      persistDetailsTimer = null;
+    }
+    saveThreadDetailsSnapshot(`shutdown:${signal}`);
+  } catch {}
   try { await webServer.close(); } catch {}
   try { await proxyServer.close(); } catch {}
   try { appServerClient.stop(); } catch {}

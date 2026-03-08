@@ -382,9 +382,37 @@ function renderMessageBlock(message) {
   }</div></div>`;
 }
 
+function isToolCardDone(card) {
+  if (!card) return false;
+  if (card.done === true) return true;
+  const status = String(card.status || '').toLowerCase();
+  if (!status) return false;
+  return (
+    status.includes('完成')
+    || status.includes('结束')
+    || status.includes('done')
+    || status.includes('complete')
+    || status.includes('success')
+    || status.includes('finished')
+    || status.includes('interrupted')
+    || status.includes('failed')
+    || status.includes('cancel')
+    || status.includes('exited')
+  );
+}
+
 function renderToolCall(card) {
-  const preview = card.output ? compactText(card.output, 64) : '等待输出…';
-  return `<details class="toolCard ${card.status === '已完成' ? 'done' : 'running'}"><summary><span class="toolCardTitle">${escapeHtml(card.title || '工具调用')}</span><span class="toolCardStatus">${escapeHtml(card.status || '运行中')}</span></summary><div class="toolCardPreview">${escapeHtml(preview)}</div><div class="toolCardBody">${card.method ? `<div class="toolCardMethod">${escapeHtml(card.method)}</div>` : ''}<pre>${escapeHtml(card.output || '暂无输出')}</pre></div></details>`;
+  const done = isToolCardDone(card);
+  const hasOutput = Boolean(String(card.output || '').trim());
+  const hasCommand = Boolean(String(card.command || '').trim());
+  const preview = hasCommand
+    ? `命令：${compactText(String(card.command || '').trim(), 64)}`
+    : (hasOutput ? compactText(card.output, 64) : (done ? '无输出' : '等待输出…'));
+  const commandLine = hasCommand ? `<div class="toolCardMethod">${escapeHtml(card.command)}</div>` : '';
+  const methodLine = (card.method && String(card.method) !== String(card.command || ''))
+    ? `<div class="toolCardMethod">${escapeHtml(card.method)}</div>`
+    : '';
+  return `<details class="toolCard ${done ? 'done' : 'running'}"><summary><span class="toolCardTitle">${escapeHtml(card.title || '工具调用')}</span><span class="toolCardStatus">${escapeHtml(card.status || (done ? '已完成' : '运行中'))}</span></summary><div class="toolCardPreview">${escapeHtml(preview)}</div><div class="toolCardBody">${commandLine}${methodLine}<pre>${escapeHtml(hasOutput ? card.output : (done ? '无输出' : '暂无输出'))}</pre></div></details>`;
 }
 
 function isFileChangeMessage(message) {
@@ -671,11 +699,54 @@ function isToolEvent(event) {
   return false;
 }
 
+function isApprovalLikeToolMethod(method = '') {
+  const normalized = normalizeMethodText(method);
+  if (!normalized) return false;
+  return (
+    normalized.includes('requestapproval')
+    || normalized.includes('requestuserinput')
+    || normalized.includes('elicitation/request')
+  );
+}
+
+function isToolEventDisplayable(event) {
+  if (!isToolEvent(event)) return false;
+  const kind = String(event.kind || '').toLowerCase();
+  if (kind === 'command') return true;
+  if (kind === 'item_started' || kind === 'item_completed') return true;
+  if (kind === 'item_loaded') return true;
+  if (kind !== 'tool_event') return true;
+  const method = String(event.method || '');
+  return !isApprovalLikeToolMethod(method);
+}
+
+function toolCardKeyFromEvent(event = {}) {
+  const turnKey = String(event.turnId || '-');
+  if (event.itemId || event.callId) return `${turnKey}:${event.itemId || event.callId}`;
+  return `${turnKey}:${event.kind || 'tool'}:${event.method || '-'}:${event.timestamp || event.id || '-'}`;
+}
+
+function toolCardKeyFromCommand(entry = {}) {
+  const turnKey = String(entry.turnId || '-');
+  return `${turnKey}:${entry.itemId || entry.callId || 'command'}`;
+}
+
+function statusLabelFromCommand(entry = {}) {
+  const raw = String(entry.status || '').toLowerCase();
+  if (entry.exitCode != null) return `已结束(${entry.exitCode})`;
+  if (!raw) return '';
+  if (raw.includes('progress') || raw.includes('running') || raw.includes('active') || raw.includes('stream')) return '运行中';
+  if (raw.includes('fail') || raw.includes('error')) return '失败';
+  if (raw.includes('cancel') || raw.includes('interrupt')) return '已中断';
+  if (raw.includes('complete') || raw.includes('done') || raw.includes('success') || raw.includes('finish')) return '已完成';
+  return entry.status;
+}
+
 function buildToolActivityCards(thread) {
-  const events = (thread?.details?.events || []).filter((event) => isToolEvent(event));
+  const events = (thread?.details?.events || []).filter((event) => isToolEventDisplayable(event));
   const cards = new Map();
   for (const event of events) {
-    const key = String(event.itemId || event.callId || event.id || `${event.kind}:${event.method || ''}`);
+    const key = toolCardKeyFromEvent(event);
     const current = cards.get(key) || {
       id: key,
       title: event.itemType ? `工具 ${event.itemType}` : '工具调用',
@@ -683,29 +754,40 @@ function buildToolActivityCards(thread) {
       updatedAt: event.timestamp || new Date().toISOString(),
       output: '',
       method: event.method || null,
+      command: event.command || null,
+      done: false,
     };
 
     if (event.kind === 'item_started') {
       current.title = event.itemType ? `工具 ${event.itemType}` : current.title;
       current.status = '运行中';
+      if (event.command) current.command = event.command;
+      current.done = false;
     } else if (event.kind === 'item_completed') {
       current.title = event.itemType ? `工具 ${event.itemType}` : current.title;
       current.status = '已完成';
+      if (event.command) current.command = event.command;
+      current.done = true;
     } else if (event.kind === 'command') {
       current.title = '命令执行';
       current.status = '运行中';
+      if (event.command) current.command = event.command;
       current.output = event.output || `${current.output}${event.delta || ''}`;
+      current.done = false;
     } else if (event.kind === 'tool_event') {
       const method = String(event.method || '');
       current.title = method || current.title;
       current.method = method;
-      current.status = method.split('/').slice(-1)[0] || current.status;
+      if (event.command) current.command = event.command;
+      current.status = '运行中';
+      current.done = false;
       if (typeof event.delta === 'string') {
         current.output = `${current.output}${event.delta}`;
       }
     } else if (event.kind === 'item_loaded') {
       current.title = event.itemType ? `工具 ${event.itemType}` : current.title;
       current.status = '已记录';
+      current.done = false;
     } else {
       current.title = event.kind || current.title;
     }
@@ -713,13 +795,41 @@ function buildToolActivityCards(thread) {
     current.updatedAt = event.timestamp || current.updatedAt;
     cards.set(key, current);
   }
+
+  const commandLog = thread?.details?.commandLog || [];
+  for (const commandEntry of commandLog) {
+    const key = toolCardKeyFromCommand(commandEntry);
+    const current = cards.get(key) || {
+      id: key,
+      title: '命令执行',
+      status: '运行中',
+      updatedAt: commandEntry.updatedAt || new Date().toISOString(),
+      output: '',
+      method: commandEntry.command || null,
+      command: commandEntry.command || null,
+      done: false,
+    };
+    current.title = '命令执行';
+    current.command = commandEntry.command || current.command;
+    if (!current.method && commandEntry.command) current.method = commandEntry.command;
+    if (typeof commandEntry.output === 'string' && commandEntry.output.length >= current.output.length) {
+      current.output = commandEntry.output;
+    }
+    const statusLabel = statusLabelFromCommand(commandEntry);
+    if (statusLabel) current.status = statusLabel;
+    if (commandEntry.exitCode != null) current.done = true;
+    if (statusLabel && statusLabel !== '运行中' && statusLabel !== '已记录') current.done = true;
+    current.updatedAt = commandEntry.updatedAt || current.updatedAt;
+    cards.set(key, current);
+  }
+
   return [...cards.values()]
     .sort((left, right) => new Date(left.updatedAt || 0).getTime() - new Date(right.updatedAt || 0).getTime())
     .slice(-24);
 }
 
 function buildToolFallbackEntries(thread) {
-  const events = (thread?.details?.events || []).filter((event) => isToolEvent(event)).slice(-80);
+  const events = (thread?.details?.events || []).filter((event) => isToolEventDisplayable(event)).slice(-80);
   return events.map((event, index) => ({
     id: `${event.threadId || ''}:${event.turnId || ''}:${event.itemId || event.callId || index}:${event.kind || 'tool'}`,
     title: event.method || event.itemType || event.kind || '工具调用',
@@ -727,10 +837,13 @@ function buildToolFallbackEntries(thread) {
     updatedAt: event.timestamp || new Date().toISOString(),
     output: event.output || event.delta || '',
     method: event.method || null,
+    command: event.command || null,
+    done: event.kind === 'item_completed',
   }));
 }
 
 function buildConversationFeed(thread) {
+  const fallbackTs = toTimestampMs(thread?.updatedAt) || Date.now();
   const messages = sortedMessages(thread)
     .filter((message) => {
       if (!message) return false;
@@ -739,14 +852,14 @@ function buildConversationFeed(thread) {
     })
     .map((message) => ({
     type: 'message',
-    timestamp: toTimestampMs(message.createdAt || message.updatedAt),
+    timestamp: toTimestampMs(message.createdAt || message.updatedAt) || fallbackTs,
     item: message,
     }));
   const toolCards = buildToolActivityCards(thread);
   const effectiveTools = toolCards.length > 0 ? toolCards : buildToolFallbackEntries(thread);
   const tools = effectiveTools.map((card) => ({
     type: 'tool',
-    timestamp: toTimestampMs(card.updatedAt),
+    timestamp: toTimestampMs(card.updatedAt) || fallbackTs,
     item: card,
   }));
   return [...messages, ...tools].sort((left, right) => left.timestamp - right.timestamp);
@@ -1469,9 +1582,22 @@ function pushThreadEventLocal(entry) {
   if (entry.kind === 'command') {
     let command = thread.details.commandLog.find((log) => log.itemId === entry.itemId);
     if (!command) {
-      command = { itemId: entry.itemId, turnId: entry.turnId, threadId: entry.threadId, callId: entry.callId, output: '', updatedAt: entry.timestamp || new Date().toISOString() };
+      command = {
+        itemId: entry.itemId,
+        turnId: entry.turnId,
+        threadId: entry.threadId,
+        callId: entry.callId,
+        command: entry.command || '',
+        status: entry.status || null,
+        exitCode: entry.exitCode ?? null,
+        output: '',
+        updatedAt: entry.timestamp || new Date().toISOString(),
+      };
       thread.details.commandLog.push(command);
     }
+    if (entry.command) command.command = entry.command;
+    if (entry.status != null) command.status = entry.status;
+    if (entry.exitCode != null) command.exitCode = entry.exitCode;
     command.output = entry.output || `${command.output}${entry.delta || ''}`;
     command.updatedAt = entry.timestamp || new Date().toISOString();
   }

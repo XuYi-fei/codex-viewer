@@ -329,12 +329,12 @@ export class ViewerStore {
       this.addThreadEvent(threadId, { kind: 'item_started', threadId, turnId, itemType: 'unknown', timestamp: nowIso() });
       return;
     }
+    const detail = this.ensureThreadDetail(threadId);
 
     if (item.type === 'userMessage') {
       const text = Array.isArray(item.content)
         ? item.content.map((entry) => entry.text || '').join('')
         : item.text || '';
-      const detail = this.ensureThreadDetail(threadId);
       const exists = detail.messages.find((entry) => entry.turnId === turnId && entry.itemId === item.id && entry.role === 'user');
       if (!exists) {
         detail.messages.push({
@@ -364,6 +364,44 @@ export class ViewerStore {
       this.ensureMessage({ threadId, turnId, itemId: item.id, role: 'reasoning' });
     }
 
+    if (item.type === 'commandExecution') {
+      let command = detail.commandLog.find((entry) => entry.itemId === item.id);
+      if (!command) {
+        command = {
+          threadId,
+          turnId,
+          itemId: item.id,
+          callId: item.processId || item.callId || item.id,
+          command: item.command || '',
+          cwd: item.cwd || null,
+          status: item.status || 'in_progress',
+          output: item.aggregatedOutput || '',
+          updatedAt: nowIso(),
+        };
+        detail.commandLog.push(command);
+      } else {
+        if (typeof item.command === 'string' && item.command) command.command = item.command;
+        if (typeof item.cwd === 'string' && item.cwd) command.cwd = item.cwd;
+        if (item.status != null) command.status = item.status;
+        if (typeof item.aggregatedOutput === 'string' && item.aggregatedOutput.length >= (command.output || '').length) {
+          command.output = item.aggregatedOutput;
+        }
+        command.updatedAt = nowIso();
+      }
+
+      this.addThreadEvent(threadId, {
+        kind: 'command',
+        threadId,
+        turnId,
+        itemId: item.id,
+        callId: command.callId || null,
+        command: command.command || '',
+        status: command.status || 'in_progress',
+        output: command.output || '',
+        timestamp: nowIso(),
+      });
+    }
+
     this.addThreadEvent(threadId, {
       kind: 'item_started',
       threadId,
@@ -371,6 +409,8 @@ export class ViewerStore {
       itemType: item.type,
       itemId: item.id,
       text: item.type === 'userMessage' ? (Array.isArray(item.content) ? item.content.map((entry) => entry.text || '').join('') : item.text || '') : undefined,
+      command: item.type === 'commandExecution' ? (item.command || '') : undefined,
+      callId: item.type === 'commandExecution' ? (item.processId || item.callId || item.id || null) : undefined,
       label: item.type === 'reasoning' ? 'Thinking started' : `${item.type} started`,
       timestamp: nowIso(),
     });
@@ -378,13 +418,14 @@ export class ViewerStore {
 
   completeItem({ threadId, turnId, item }) {
     const detail = this.ensureThreadDetail(threadId);
+    const completedAt = nowIso();
 
     if (item?.type === 'agentMessage') {
       const message = this.ensureMessage({ threadId, turnId, itemId: item.id, role: 'assistant' });
       if (typeof item.text === 'string') message.text = item.text;
       message.phase = item.phase || message.phase || null;
       message.status = 'completed';
-      message.updatedAt = nowIso();
+      message.updatedAt = completedAt;
     }
 
     if (item?.type === 'reasoning') {
@@ -396,7 +437,42 @@ export class ViewerStore {
         message.summaryText = item.summary.map((entry) => entry.text || '').join('');
       }
       message.status = 'completed';
-      message.updatedAt = nowIso();
+      message.updatedAt = completedAt;
+    }
+
+    if (item?.type === 'commandExecution') {
+      let command = detail.commandLog.find((entry) => entry.itemId === item.id);
+      if (!command) {
+        command = {
+          threadId,
+          turnId,
+          itemId: item.id,
+          callId: item.processId || item.callId || item.id,
+          output: '',
+          updatedAt: completedAt,
+        };
+        detail.commandLog.push(command);
+      }
+      if (typeof item.command === 'string' && item.command) command.command = item.command;
+      if (typeof item.cwd === 'string' && item.cwd) command.cwd = item.cwd;
+      if (typeof item.aggregatedOutput === 'string' && item.aggregatedOutput.length >= (command.output || '').length) {
+        command.output = item.aggregatedOutput;
+      }
+      if (item.status != null) command.status = item.status;
+      if (item.exitCode != null) command.exitCode = item.exitCode;
+      if (item.durationMs != null) command.durationMs = item.durationMs;
+      command.updatedAt = completedAt;
+      this.addThreadEvent(threadId, {
+        kind: 'command',
+        threadId,
+        turnId,
+        itemId: item.id,
+        callId: command.callId || null,
+        output: command.output || '',
+        status: command.status || null,
+        exitCode: command.exitCode ?? null,
+        timestamp: completedAt,
+      });
     }
 
     if (item?.type === 'fileChange') {
@@ -405,7 +481,7 @@ export class ViewerStore {
       message.text = summary.text;
       message.phase = item.status || message.phase || null;
       message.status = 'completed';
-      message.updatedAt = nowIso();
+      message.updatedAt = completedAt;
       this.addThreadEvent(threadId, {
         kind: 'file_change',
         threadId,
@@ -415,7 +491,7 @@ export class ViewerStore {
         count: summary.count,
         files: summary.paths,
         status: item.status || null,
-        timestamp: nowIso(),
+        timestamp: completedAt,
       });
     }
 
@@ -423,7 +499,7 @@ export class ViewerStore {
       const userMessage = detail.messages.find((entry) => entry.turnId === turnId && entry.itemId === item.id && entry.role === 'user');
       if (userMessage) {
         userMessage.status = 'completed';
-        userMessage.updatedAt = nowIso();
+        userMessage.updatedAt = completedAt;
       }
     }
 
@@ -434,7 +510,7 @@ export class ViewerStore {
       itemType: item?.type || 'unknown',
       itemId: item?.id || null,
       label: item?.type === 'reasoning' ? 'Thinking completed' : `${item?.type || 'item'} completed`,
-      timestamp: nowIso(),
+      timestamp: completedAt,
     });
   }
 
@@ -816,6 +892,61 @@ export class ViewerStore {
       ...thread,
       details: this.threadDetails.get(threadId) || createThreadDetails(threadId),
     };
+  }
+
+  exportThreadDetails({
+    maxThreads = 300,
+    maxEvents = 800,
+    maxMessages = 600,
+    maxCommandLog = 300,
+    maxPlanLog = 300,
+  } = {}) {
+    const entries = [];
+    for (const [threadId, details] of this.threadDetails.entries()) {
+      if (!threadId || this.isThreadHidden(threadId)) continue;
+      const summary = this.threadMap.get(threadId);
+      const normalized = {
+        id: threadId,
+        title: summary?.title || 'Untitled thread',
+        updatedAt: summary?.updatedAt || nowIso(),
+        events: Array.isArray(details?.events) ? details.events.slice(-maxEvents) : [],
+        messages: Array.isArray(details?.messages) ? details.messages.slice(-maxMessages) : [],
+        commandLog: Array.isArray(details?.commandLog) ? details.commandLog.slice(-maxCommandLog) : [],
+        planLog: Array.isArray(details?.planLog) ? details.planLog.slice(-maxPlanLog) : [],
+      };
+      entries.push(normalized);
+    }
+    entries.sort((left, right) => new Date(right.updatedAt || 0).getTime() - new Date(left.updatedAt || 0).getTime());
+    return {
+      version: 1,
+      exportedAt: nowIso(),
+      threadDetails: entries.slice(0, maxThreads),
+    };
+  }
+
+  importThreadDetails(snapshot = null) {
+    if (!snapshot || typeof snapshot !== 'object') return 0;
+    const entries = Array.isArray(snapshot.threadDetails) ? snapshot.threadDetails : [];
+    let count = 0;
+    for (const entry of entries) {
+      const threadId = entry?.id;
+      if (!threadId) continue;
+      if (this.isThreadHidden(threadId)) continue;
+      const current = this.threadDetails.get(threadId) || createThreadDetails(threadId);
+      const next = {
+        id: threadId,
+        events: Array.isArray(entry?.events) ? entry.events : current.events || [],
+        messages: Array.isArray(entry?.messages) ? entry.messages : current.messages || [],
+        commandLog: Array.isArray(entry?.commandLog) ? entry.commandLog : current.commandLog || [],
+        planLog: Array.isArray(entry?.planLog) ? entry.planLog : current.planLog || [],
+      };
+      next.messages.sort((left, right) => new Date(left.createdAt || left.updatedAt || 0).getTime() - new Date(right.createdAt || right.updatedAt || 0).getTime());
+      next.events.sort((left, right) => new Date(left.timestamp || 0).getTime() - new Date(right.timestamp || 0).getTime());
+      next.commandLog.sort((left, right) => new Date(left.updatedAt || 0).getTime() - new Date(right.updatedAt || 0).getTime());
+      this.threadDetails.set(threadId, next);
+      count += 1;
+    }
+    return count;
   }
 
   snapshot(sessionId = null) {
