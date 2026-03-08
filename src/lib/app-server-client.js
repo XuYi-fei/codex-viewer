@@ -4,7 +4,7 @@ import process from 'node:process';
 import { randomToken, wait, nowIso } from './utils.js';
 
 export class AppServerClient extends EventEmitter {
-  constructor({ port, workspacePath, proxyPort, model = null, approvalPolicy = 'on-request', sandbox = 'workspace-write' }) {
+  constructor({ port, workspacePath, proxyPort, model = null, approvalPolicy = 'on-request', sandbox = 'workspace-write', requestTimeoutMs = 15_000 }) {
     super();
     this.port = port;
     this.workspacePath = workspacePath;
@@ -12,6 +12,7 @@ export class AppServerClient extends EventEmitter {
     this.model = model;
     this.approvalPolicy = approvalPolicy;
     this.sandbox = sandbox;
+    this.requestTimeoutMs = requestTimeoutMs;
     this.child = null;
     this.ws = null;
     this.requestMap = new Map();
@@ -50,7 +51,13 @@ export class AppServerClient extends EventEmitter {
         });
         this.ws = ws;
         ws.addEventListener('message', (event) => this.handleMessage(event.data.toString()));
-        ws.addEventListener('close', () => this.emit('closed'));
+        ws.addEventListener('close', () => {
+          this.failPendingRequests(new Error('Codex app-server connection closed'));
+          this.emit('closed');
+        });
+        ws.addEventListener('error', () => {
+          this.emit('diagnostic', { stream: 'protocol', text: 'websocket transport error' });
+        });
         return;
       } catch {
         await wait(150);
@@ -72,13 +79,34 @@ export class AppServerClient extends EventEmitter {
     this.notify('initialized');
   }
 
-  async request(method, params) {
+  async request(method, params, { timeoutMs = this.requestTimeoutMs } = {}) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new Error('Codex app-server connection is not open');
+    }
     const id = randomToken(10);
     const payload = { jsonrpc: '2.0', id, method, params };
     const promise = new Promise((resolve, reject) => {
-      this.requestMap.set(id, { resolve, reject, method });
+      const safeTimeoutMs = Number(timeoutMs);
+      const timer = Number.isFinite(safeTimeoutMs) && safeTimeoutMs > 0
+        ? setTimeout(() => {
+          if (!this.requestMap.has(id)) return;
+          this.clearPendingRequest(id);
+          reject(new Error(`App-server request timeout (${method}) after ${safeTimeoutMs}ms`));
+        }, safeTimeoutMs)
+        : null;
+      this.requestMap.set(id, {
+        resolve,
+        reject,
+        method,
+        timer,
+      });
     });
-    this.ws.send(JSON.stringify(payload));
+    try {
+      this.ws.send(JSON.stringify(payload));
+    } catch (error) {
+      const pending = this.clearPendingRequest(id);
+      pending?.reject(error);
+    }
     return promise;
   }
 
@@ -139,11 +167,30 @@ export class AppServerClient extends EventEmitter {
   }
 
   stop() {
+    this.failPendingRequests(new Error('Codex app-server client stopped'));
     try {
       this.ws?.close();
     } catch {}
     if (this.child && !this.child.killed) {
       this.child.kill('SIGTERM');
+    }
+  }
+
+  clearPendingRequest(id) {
+    if (!this.requestMap.has(id)) return null;
+    const pending = this.requestMap.get(id);
+    this.requestMap.delete(id);
+    if (pending?.timer) clearTimeout(pending.timer);
+    return pending || null;
+  }
+
+  failPendingRequests(error) {
+    for (const id of [...this.requestMap.keys()]) {
+      const pending = this.clearPendingRequest(id);
+      if (!pending) continue;
+      try {
+        pending.reject(error);
+      } catch {}
     }
   }
 
@@ -160,15 +207,15 @@ export class AppServerClient extends EventEmitter {
     const messageId = hasId ? message.id : undefined;
 
     if (hasId && this.requestMap.has(messageId) && Object.prototype.hasOwnProperty.call(message, 'result')) {
-      const pending = this.requestMap.get(messageId);
-      this.requestMap.delete(messageId);
+      const pending = this.clearPendingRequest(messageId);
+      if (!pending) return;
       pending.resolve(message.result);
       this.emit('response', { method: pending.method, result: message.result, timestamp: nowIso() });
       return;
     }
     if (hasId && this.requestMap.has(messageId) && message.error) {
-      const pending = this.requestMap.get(messageId);
-      this.requestMap.delete(messageId);
+      const pending = this.clearPendingRequest(messageId);
+      if (!pending) return;
       pending.reject(new Error(message.error.message || JSON.stringify(message.error)));
       return;
     }

@@ -21,6 +21,8 @@ const state = {
   modal: null,
   mobileDrawerOpen: false,
   sendingPrompt: false,
+  interruptingThreadIds: new Set(),
+  cleaningStuckThreads: false,
   promptIsComposing: false,
   promptLastCompositionEndAt: 0,
   askUserDraft: {},
@@ -39,14 +41,33 @@ function h(strings, ...values) {
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(path, {
-    ...options,
-    headers: {
-      'content-type': 'application/json',
-      ...(state.token ? { authorization: `Bearer ${state.token}` } : {}),
-      ...(options.headers || {}),
-    },
-  });
+  const {
+    timeoutMs = 15_000,
+    ...requestOptions
+  } = options || {};
+  const controller = new AbortController();
+  const timer = Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) > 0
+    ? setTimeout(() => controller.abort(), Number(timeoutMs))
+    : null;
+  let response;
+  try {
+    response = await fetch(path, {
+      ...requestOptions,
+      signal: controller.signal,
+      headers: {
+        'content-type': 'application/json',
+        ...(state.token ? { authorization: `Bearer ${state.token}` } : {}),
+        ...(requestOptions.headers || {}),
+      },
+    });
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      throw new Error(`请求超时（>${Math.round(Number(timeoutMs) / 1000)}s）`);
+    }
+    throw error;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: response.statusText }));
     throw new Error(error.error || response.statusText);
@@ -660,8 +681,16 @@ function getSelectedBusyThread() {
   return isThreadBusy(selected) ? selected : null;
 }
 
+function getBusyThreadIds() {
+  return state.threads
+    .filter((thread) => isThreadBusy(thread))
+    .map((thread) => thread.id)
+    .filter(Boolean);
+}
+
 function isThreadInterruptPending(thread) {
   if (!thread) return false;
+  if (state.interruptingThreadIds.has(thread.id)) return true;
   const events = thread.details?.events || [];
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index] || {};
@@ -682,6 +711,20 @@ function isThreadInterruptPending(thread) {
     }
   }
   return false;
+}
+
+function isRecoverableInterruptIssue(message = '') {
+  const text = String(message || '').toLowerCase();
+  if (!text) return false;
+  return (
+    text.includes('missing active turnid')
+    || text.includes('missing field turnid')
+    || text.includes('thread not found')
+    || text.includes('request timeout')
+    || text.includes('connection closed')
+    || text.includes('connection is not open')
+    || text.includes('请求超时')
+  );
 }
 
 function isToolItemType(value) {
@@ -1807,6 +1850,9 @@ function renderHeader() {
 function renderSidebar() {
   const selected = getSelectedThread();
   const interruptPending = selected ? isThreadInterruptPending(selected) : false;
+  const canControl = state.session?.viewerRole === 'controller';
+  const busyThreadIds = getBusyThreadIds();
+  const busyThreadCount = busyThreadIds.length;
   const interactionContext = selected ? getCurrentInteractionContext() : null;
   const hasStuckInteraction = Boolean(interactionContext && (
     interactionContext.source === 'tool_event'
@@ -1833,6 +1879,15 @@ function renderSidebar() {
           <button id="new-thread" class="button secondary">新建</button>
         </div>
         <div class="panelSubtle">已从 Codex app-server 加载 ${state.threads.length} 个线程</div>
+        ${busyThreadCount > 0 ? `
+          <div class="toolbar" style="margin: 8px 0 10px;">
+            <button
+              class="button danger"
+              data-thread-clean-stuck="1"
+              ${(state.cleaningStuckThreads || !canControl) ? 'disabled' : ''}
+            >${state.cleaningStuckThreads ? `清理中… (${busyThreadCount})` : `批量清理卡死线程 (${busyThreadCount})`}</button>
+          </div>
+        ` : ''}
         <div class="scrollArea threadList">
           ${state.threads.map((thread) => h`
             <div class="threadCard ${thread.id === state.selectedThreadId ? 'active' : ''}" data-thread-id="${thread.id}">
@@ -1860,7 +1915,7 @@ function renderSidebar() {
             <div class="key">思考数</div><div>${selected.details?.messages?.filter((entry) => entry.role === 'reasoning').length || 0}</div>
           </div>
           <div class="toolbar" style="margin-top: 10px;">
-            ${isThreadBusy(selected) ? `<button class="button secondary" data-thread-interrupt="${escapeHtml(selected.id)}" ${interruptPending ? 'disabled' : ''}>${interruptPending ? '中断中…' : '中断该线程'}</button>` : ''}
+            ${isThreadBusy(selected) ? `<button class="button secondary" data-thread-interrupt="${escapeHtml(selected.id)}" ${(interruptPending || !canControl) ? 'disabled' : ''}>${!canControl ? '只读模式无法中断' : (interruptPending ? '中断中…' : '中断该线程')}</button>` : ''}
             ${hasStuckInteraction ? `<button class="button secondary" data-thread-force-clean="${escapeHtml(selected.id)}">强制清理线程</button>` : ''}
             <button class="button danger" data-thread-remove="${escapeHtml(selected.id)}">从列表移除</button>
           </div>
@@ -2842,7 +2897,7 @@ function render() {
 }
 
 function bindActions() {
-  const removeThreadById = async (threadId, { confirmFirst = true } = {}) => {
+  const removeThreadById = async (threadId, { confirmFirst = true, refreshAfter = true } = {}) => {
     if (!threadId) return;
     if (confirmFirst) {
       const sure = window.confirm('确认从列表移除该线程？如果线程仍在执行，会先尝试中断。');
@@ -2852,10 +2907,18 @@ function bindActions() {
       method: 'POST',
       body: '{}',
     });
+    state.interruptingThreadIds.delete(threadId);
+    state.threads = state.threads.filter((thread) => thread.id !== threadId);
+    state.approvals = state.approvals.filter((approval) => approval.threadId !== threadId);
     if (state.selectedThreadId === threadId) {
       setSelectedThread(null);
     }
-    await refreshData();
+    render();
+    if (refreshAfter) {
+      refreshData().catch((error) => {
+        console.warn('Failed to refresh data after removing thread', error);
+      });
+    }
   };
 
   document.querySelectorAll('[data-thread-id]').forEach((node) => {
@@ -2881,23 +2944,24 @@ function bindActions() {
     node.onclick = async () => {
       const threadId = node.dataset.threadInterrupt;
       if (!threadId) return;
+      if (state.interruptingThreadIds.has(threadId)) return;
+      state.interruptingThreadIds.add(threadId);
+      render();
       try {
         const result = await api(`/api/threads/${encodeURIComponent(threadId)}/interrupt`, {
           method: 'POST',
           body: '{}',
         });
-        await refreshData();
+        refreshData().catch((error) => {
+          console.warn('Failed to refresh data after interrupt', error);
+        });
         if (result?.requested && !result?.interrupted) {
           alert('已发送中断请求，但线程仍在执行，请稍后观察状态变化。');
         }
       } catch (error) {
         const message = error.message || '中断失败，请重试。';
-        if (
-          message.includes('missing active turnId')
-          || message.includes('missing field turnId')
-          || message.includes('missing field `turnId`')
-        ) {
-          const shouldRemove = window.confirm('该线程缺少可中断的 turnId，通常是旧 ask-user 卡死会话。是否直接从列表强制清理？');
+        if (isRecoverableInterruptIssue(message)) {
+          const shouldRemove = window.confirm('该线程中断失败（可能缺少 turnId 或线程已失效），通常属于卡死历史会话。是否直接从列表强制清理？');
           if (shouldRemove) {
             try {
               await removeThreadById(threadId, { confirmFirst: false });
@@ -2909,6 +2973,9 @@ function bindActions() {
           }
         }
         alert(message);
+      } finally {
+        state.interruptingThreadIds.delete(threadId);
+        render();
       }
     };
   });
@@ -2936,6 +3003,43 @@ function bindActions() {
       } catch (error) {
         alert(error.message || '移除失败，请重试。');
       }
+    };
+  });
+
+  document.querySelectorAll('[data-thread-clean-stuck]').forEach((node) => {
+    node.onclick = async () => {
+      if (state.cleaningStuckThreads) return;
+      const stuckIds = getBusyThreadIds();
+      if (stuckIds.length === 0) {
+        alert('当前没有可清理的卡死线程。');
+        return;
+      }
+      const sure = window.confirm(`将尝试批量清理 ${stuckIds.length} 个卡死线程，是否继续？`);
+      if (!sure) return;
+      state.cleaningStuckThreads = true;
+      render();
+      let cleaned = 0;
+      const failed = [];
+      for (const threadId of stuckIds) {
+        try {
+          // Batch cleanup skips per-item refresh and does one refresh at the end.
+          await removeThreadById(threadId, { confirmFirst: false, refreshAfter: false });
+          cleaned += 1;
+        } catch (error) {
+          failed.push({ threadId, message: error?.message || 'unknown error' });
+        }
+      }
+      await refreshData().catch((error) => {
+        console.warn('Failed to refresh data after batch cleanup', error);
+      });
+      state.cleaningStuckThreads = false;
+      render();
+      if (failed.length > 0) {
+        const details = failed.slice(0, 5).map((item) => `${compactId(item.threadId, 8, 6)}: ${item.message}`).join('\n');
+        alert(`批量清理完成：成功 ${cleaned}，失败 ${failed.length}\n${details}`);
+        return;
+      }
+      alert(`批量清理完成：成功 ${cleaned} 个卡死线程。`);
     };
   });
 
