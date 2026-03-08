@@ -636,8 +636,13 @@ function isThreadInterruptPending(thread) {
   if (!thread) return false;
   const events = thread.details?.events || [];
   for (let index = events.length - 1; index >= 0; index -= 1) {
-    const kind = String(events[index]?.kind || '');
-    if (kind === 'turn/interrupt_requested') return true;
+    const event = events[index] || {};
+    const kind = String(event.kind || '');
+    if (kind === 'turn/interrupt_requested') {
+      const ts = toTimestampMs(event.timestamp);
+      if (!ts) return true;
+      return (Date.now() - ts) < 15_000;
+    }
     if (
       kind === 'turn/interrupted'
       || kind === 'turn/completed'
@@ -1676,6 +1681,12 @@ function renderHeader() {
 function renderSidebar() {
   const selected = getSelectedThread();
   const interruptPending = selected ? isThreadInterruptPending(selected) : false;
+  const interactionContext = selected ? getCurrentInteractionContext() : null;
+  const hasStuckInteraction = Boolean(interactionContext && (
+    interactionContext.source === 'tool_event'
+    || interactionContext.source === 'network'
+    || interactionContext.source === 'approval'
+  ));
   return h`
     <div class="column sidebar">
       <div class="panel">
@@ -1724,6 +1735,7 @@ function renderSidebar() {
           </div>
           <div class="toolbar" style="margin-top: 10px;">
             ${isThreadBusy(selected) ? `<button class="button secondary" data-thread-interrupt="${escapeHtml(selected.id)}" ${interruptPending ? 'disabled' : ''}>${interruptPending ? '中断中…' : '中断该线程'}</button>` : ''}
+            ${hasStuckInteraction ? `<button class="button secondary" data-thread-force-clean="${escapeHtml(selected.id)}">强制清理线程</button>` : ''}
             <button class="button danger" data-thread-remove="${escapeHtml(selected.id)}">从列表移除</button>
           </div>
         </div>
@@ -2288,6 +2300,7 @@ function renderAskUserComposer(context) {
   const askParams = approval?.params || signal?.params || {};
   const questions = askParams?.questions || [];
   const approvalId = approval?.id || '';
+  const threadId = approval?.threadId || signal?.threadId || state.selectedThreadId || '';
   const awaitingApproval = !approval;
   const canResolve = !awaitingApproval && state.session?.viewerRole === 'controller';
   const canSubmit = canResolve && questions.length > 0;
@@ -2352,6 +2365,12 @@ function renderAskUserComposer(context) {
           ${!canSubmit ? 'disabled' : ''}
         >提交回答</button>
       </div>
+      ${awaitingApproval && threadId ? `
+        <div class="toolbar" style="margin-top: 8px;">
+          <button class="button secondary" data-thread-interrupt="${escapeHtml(threadId)}">重试中断</button>
+          <button class="button danger" data-thread-force-clean="${escapeHtml(threadId)}">强制清理线程</button>
+        </div>
+      ` : ''}
     </div>
   `;
 }
@@ -2363,6 +2382,8 @@ function renderInteractionComposer(context) {
   }
   if (context.source === 'tool_event') {
     const fallback = describeToolApprovalFallbackEvent(context.event || {});
+    const threadId = context.event?.threadId || state.selectedThreadId || '';
+    const threadIdEscaped = escapeHtml(threadId);
     return h`
       <div class="askUserComposer networkOnly">
         <div class="askUserHeader">
@@ -2378,6 +2399,12 @@ function renderInteractionComposer(context) {
         ${fallback.reason ? `<div class="panelSubtle">原因：${escapeHtml(compactText(fallback.reason, 220))}</div>` : ''}
         ${fallback.command ? `<div class="panelSubtle">内容：${escapeHtml(compactText(fallback.command, 220))}</div>` : ''}
         ${fallback.availableDecisions.length ? `<div class="panelSubtle">可选决策：${escapeHtml(fallback.availableDecisions.join(' / '))}</div>` : ''}
+        ${threadId ? `
+          <div class="toolbar" style="margin-top: 8px;">
+            <button class="button secondary" data-thread-interrupt="${threadIdEscaped}">重试中断</button>
+            <button class="button danger" data-thread-force-clean="${threadIdEscaped}">强制清理线程</button>
+          </div>
+        ` : ''}
       </div>
     `;
   }
@@ -2680,6 +2707,22 @@ function render() {
 }
 
 function bindActions() {
+  const removeThreadById = async (threadId, { confirmFirst = true } = {}) => {
+    if (!threadId) return;
+    if (confirmFirst) {
+      const sure = window.confirm('确认从列表移除该线程？如果线程仍在执行，会先尝试中断。');
+      if (!sure) return;
+    }
+    await api(`/api/threads/${encodeURIComponent(threadId)}/remove`, {
+      method: 'POST',
+      body: '{}',
+    });
+    if (state.selectedThreadId === threadId) {
+      setSelectedThread(null);
+    }
+    await refreshData();
+  };
+
   document.querySelectorAll('[data-thread-id]').forEach((node) => {
     node.onclick = async () => {
       const threadId = node.dataset.threadId;
@@ -2712,7 +2755,38 @@ function bindActions() {
           alert('已发送中断请求，但线程仍在执行，请稍后观察状态变化。');
         }
       } catch (error) {
-        alert(error.message || '中断失败，请重试。');
+        const message = error.message || '中断失败，请重试。';
+        if (
+          message.includes('missing active turnId')
+          || message.includes('missing field turnId')
+          || message.includes('missing field `turnId`')
+        ) {
+          const shouldRemove = window.confirm('该线程缺少可中断的 turnId，通常是旧 ask-user 卡死会话。是否直接从列表强制清理？');
+          if (shouldRemove) {
+            try {
+              await removeThreadById(threadId, { confirmFirst: false });
+              return;
+            } catch (removeError) {
+              alert(removeError.message || '强制清理失败，请重试。');
+              return;
+            }
+          }
+        }
+        alert(message);
+      }
+    };
+  });
+
+  document.querySelectorAll('[data-thread-force-clean]').forEach((node) => {
+    node.onclick = async () => {
+      const threadId = node.dataset.threadForceClean;
+      if (!threadId) return;
+      const sure = window.confirm('该线程可能是旧交互卡住状态。将直接从列表清理（不再尝试恢复这个线程），是否继续？');
+      if (!sure) return;
+      try {
+        await removeThreadById(threadId, { confirmFirst: false });
+      } catch (error) {
+        alert(error.message || '强制清理失败，请重试。');
       }
     };
   });
@@ -2721,17 +2795,8 @@ function bindActions() {
     node.onclick = async () => {
       const threadId = node.dataset.threadRemove;
       if (!threadId) return;
-      const sure = window.confirm('确认从列表移除该线程？如果线程仍在执行，会先尝试中断。');
-      if (!sure) return;
       try {
-        await api(`/api/threads/${encodeURIComponent(threadId)}/remove`, {
-          method: 'POST',
-          body: '{}',
-        });
-        if (state.selectedThreadId === threadId) {
-          setSelectedThread(null);
-        }
-        await refreshData();
+        await removeThreadById(threadId, { confirmFirst: true });
       } catch (error) {
         alert(error.message || '移除失败，请重试。');
       }
